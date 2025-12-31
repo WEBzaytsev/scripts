@@ -10,7 +10,7 @@ wget -qO- https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/e
 
 ```bash
 
-ssh-keygen  -t  ed25519  -a  64  -f  ~/.ssh/id_ed25519
+ssh-keygen  -t  ed25519  
 
 ```
 
