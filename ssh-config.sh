@@ -106,13 +106,21 @@ if command -v semanage &>/dev/null && getenforce 2>/dev/null | grep -qi "enforci
     echo -e "${GREEN}SELinux: port $NEW_PORT allowed${NC}"
 fi
 
+# Disable ssh.socket if exists (overrides sshd_config port)
+if systemctl is-enabled ssh.socket &>/dev/null; then
+    echo -e "${YELLOW}Disabling ssh.socket (uses port from config)...${NC}"
+    systemctl disable ssh.socket &>/dev/null || true
+    systemctl stop ssh.socket &>/dev/null || true
+    echo -e "${GREEN}ssh.socket disabled${NC}"
+fi
+
 # Restart SSH
 echo ""
 echo -e "${YELLOW}Restarting SSH...${NC}"
-if systemctl is-active --quiet sshd; then
+if systemctl list-units --type=service | grep -q "sshd.service"; then
     systemctl restart sshd
     echo -e "${GREEN}sshd restarted${NC}"
-elif systemctl is-active --quiet ssh; then
+elif systemctl list-units --type=service | grep -q "ssh.service"; then
     systemctl restart ssh
     echo -e "${GREEN}ssh restarted${NC}"
 else
