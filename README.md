@@ -1,9 +1,23 @@
+## BBR
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/enable-bbr.sh | sudo sh
 ```
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/enable-bbr.sh | sudo sh
+```
+
+---
+
+## SSH Config
+
+```bash
+curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ssh-config.sh -o ssh-config.sh && sudo bash ssh-config.sh
+```
+
+```bash
+wget -qO ssh-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ssh-config.sh && sudo bash ssh-config.sh
 ```
 
 ---
