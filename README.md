@@ -22,6 +22,18 @@ wget -qO ssh-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs
 
 ---
 
+## UFW Firewall
+
+```bash
+curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ufw-config.sh -o ufw-config.sh && sudo bash ufw-config.sh
+```
+
+```bash
+wget -qO ufw-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ufw-config.sh && sudo bash ufw-config.sh
+```
+
+---
+
 ```bash
 
 ssh-keygen  -t  ed25519  

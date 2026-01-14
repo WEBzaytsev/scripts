@@ -125,6 +125,10 @@ set_sshd_option "MaxAuthTries" "6"
 set_sshd_option "MaxSessions" "4"
 set_sshd_option "MaxStartups" "10:30:60"
 
+# Save port marker for ufw-config.sh
+echo "$NEW_PORT" > /etc/ssh/.custom_port
+echo -e "${GREEN}Port marker saved for UFW script${NC}"
+
 # Test config
 echo ""
 echo -e "${YELLOW}Testing SSH config...${NC}"
