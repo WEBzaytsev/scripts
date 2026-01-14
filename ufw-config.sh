@@ -63,16 +63,22 @@ if command -v openvpn &>/dev/null || systemctl list-units --type=service 2>/dev/
     OPENVPN_INSTALLED=true
 fi
 
-# Detect Remnawave node port
+# Detect Remnawave/Remnanode port
 REMNAWAVE_PORT=""
-REMNAWAVE_ENV="/opt/remnawave/.env"
+REMNAWAVE_PATHS=(
+    "/opt/remnanode/.env"
+    "/opt/remnawave/.env"
+)
 
-if [[ -f "$REMNAWAVE_ENV" ]]; then
-    REMNAWAVE_PORT=$(grep -E "^NODE_PORT=" "$REMNAWAVE_ENV" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
-    if [[ -n "$REMNAWAVE_PORT" ]]; then
-        echo -e "Remnawave port: ${GREEN}$REMNAWAVE_PORT${NC}"
+for REMNAWAVE_ENV in "${REMNAWAVE_PATHS[@]}"; do
+    if [[ -f "$REMNAWAVE_ENV" ]]; then
+        REMNAWAVE_PORT=$(grep -E "^NODE_PORT=" "$REMNAWAVE_ENV" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+        if [[ -n "$REMNAWAVE_PORT" ]]; then
+            echo -e "Remnanode port: ${GREEN}$REMNAWAVE_PORT${NC} (from $REMNAWAVE_ENV)"
+            break
+        fi
     fi
-fi
+done
 
 echo ""
 echo -e "${YELLOW}Will configure:${NC}"
