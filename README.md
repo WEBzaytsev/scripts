@@ -1,11 +1,11 @@
 ## BBR
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/enable-bbr.sh | sudo sh
+curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh | sudo sh
 ```
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/enable-bbr.sh | sudo sh
+wget -qO- https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh | sudo sh
 ```
 
 ---
@@ -13,11 +13,11 @@ wget -qO- https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/e
 ## SSH Config
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ssh-config.sh -o ssh-config.sh && sudo bash ssh-config.sh
+curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh -o ssh-config.sh && sudo bash ssh-config.sh
 ```
 
 ```bash
-wget -qO ssh-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ssh-config.sh && sudo bash ssh-config.sh
+wget -qO ssh-config.sh https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh && sudo bash ssh-config.sh
 ```
 
 ---
@@ -25,11 +25,11 @@ wget -qO ssh-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs
 ## UFW Firewall
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ufw-config.sh -o ufw-config.sh && sudo bash ufw-config.sh
+curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh -o ufw-config.sh && sudo bash ufw-config.sh
 ```
 
 ```bash
-wget -qO ufw-config.sh https://raw.githubusercontent.com/WEBzaytsev/scripts/refs/heads/main/ufw-config.sh && sudo bash ufw-config.sh
+wget -qO ufw-config.sh https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh && sudo bash ufw-config.sh
 ```
 
 ---
