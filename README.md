@@ -12,12 +12,16 @@ wget -qO- https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh | su
 
 ## SSH Config
 
-```bash
-curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh -o ssh-config.sh && sudo bash ssh-config.sh
-```
+Ручной ввод порта:
 
 ```bash
-wget -qO ssh-config.sh https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh && sudo bash ssh-config.sh
+curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh | sudo bash
+```
+
+Автоматический случайный порт:
+
+```bash
+curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh | sudo bash -s -- --random
 ```
 
 ---
