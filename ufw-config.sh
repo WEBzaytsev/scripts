@@ -120,7 +120,7 @@ fi
 echo "  [x] Block ICMP ping requests"
 echo ""
 
-read -p "Continue? (y/n): " CONFIRM
+read -rp "Continue? (y/n): " CONFIRM </dev/tty
 if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
     echo "Cancelled"
     exit 0

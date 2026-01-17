@@ -83,7 +83,7 @@ validate_port() {
 prompt_port() {
     local port
     while true; do
-        read -rp "Enter SSH port (1024-65535): " port
+        read -rp "Enter SSH port (1024-65535): " port </dev/tty
         if validate_port "$port"; then
             echo "$port"
             return 0
@@ -237,7 +237,7 @@ main() {
     if [[ "$current_port" != "22" ]]; then
         echo -e "${RED}WARNING: SSH port already changed to $current_port${NC}"
         if [[ "$random_mode" == false ]]; then
-            read -rp "Continue anyway? (y/n): " confirm
+            read -rp "Continue anyway? (y/n): " confirm </dev/tty
             [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
         fi
         echo ""
@@ -272,7 +272,7 @@ main() {
     echo ""
     
     if [[ "$random_mode" == false ]]; then
-        read -rp "Continue? (y/n): " confirm
+        read -rp "Continue? (y/n): " confirm </dev/tty
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
     fi
     
