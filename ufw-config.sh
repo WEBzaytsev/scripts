@@ -26,11 +26,29 @@ check_cmd() {
     command -v "$1" &>/dev/null || { err "Required command not found: $1"; exit 1; }
 }
 
-check_cmd ufw
 check_cmd sed
 check_cmd grep
 check_cmd ss
 check_cmd awk
+
+# Install UFW if not present
+if ! command -v ufw &>/dev/null; then
+    warn "UFW not installed. Installing..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y ufw >/dev/null 2>&1
+        log "UFW installed"
+    elif command -v dnf &>/dev/null; then
+        dnf install -y ufw >/dev/null 2>&1
+        log "UFW installed"
+    elif command -v yum &>/dev/null; then
+        yum install -y ufw >/dev/null 2>&1
+        log "UFW installed"
+    else
+        err "Cannot install UFW: unknown package manager"
+        exit 1
+    fi
+fi
 
 echo ""
 echo -e "${YELLOW}========================================${NC}"
