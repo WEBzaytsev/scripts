@@ -21,11 +21,16 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Check UFW installed
-if ! command -v ufw &>/dev/null; then
-    err "UFW not installed. Install with: apt install ufw"
-    exit 1
-fi
+# Check dependencies
+check_cmd() {
+    command -v "$1" &>/dev/null || { err "Required command not found: $1"; exit 1; }
+}
+
+check_cmd ufw
+check_cmd sed
+check_cmd grep
+check_cmd ss
+check_cmd awk
 
 echo ""
 echo -e "${YELLOW}========================================${NC}"
@@ -105,12 +110,8 @@ fi
 
 echo ""
 
-# Reset UFW to defaults (but don't enable yet)
-echo -e "${YELLOW}Resetting UFW to defaults...${NC}"
-ufw --force reset >/dev/null 2>&1
-log "UFW reset"
-
-# Set default policies
+# Set default policies (if not already set)
+echo -e "${YELLOW}Setting default policies...${NC}"
 ufw default deny incoming >/dev/null 2>&1
 ufw default allow outgoing >/dev/null 2>&1
 log "Default policies set (deny incoming, allow outgoing)"
@@ -155,30 +156,41 @@ if [[ ! -f "$BEFORE_RULES" ]]; then
     exit 1
 fi
 
-# Backup
-BACKUP_FILE="${BEFORE_RULES}.backup.$(date +%Y%m%d%H%M%S)"
-cp "$BEFORE_RULES" "$BACKUP_FILE"
-log "Backup: $BACKUP_FILE"
-
-# Replace ACCEPT with DROP for ICMP rules
-# This handles both INPUT and FORWARD icmp rules
-sed -i 's/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-input -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
-
-sed -i 's/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
-sed -i 's/-A ufw-before-forward -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
-
-# Add source-quench DROP if not exists
+# Check if ICMP rules need changing
+ICMP_NEEDS_CHANGE=false
+if grep -q "icmp.*-j ACCEPT" "$BEFORE_RULES"; then
+    ICMP_NEEDS_CHANGE=true
+fi
 if ! grep -q "icmp-type source-quench" "$BEFORE_RULES"; then
-    # Add after the echo-request line in INPUT section
-    sed -i '/-A ufw-before-input -p icmp --icmp-type echo-request/a -A ufw-before-input -p icmp --icmp-type source-quench -j DROP' "$BEFORE_RULES"
+    ICMP_NEEDS_CHANGE=true
 fi
 
-log "ICMP rules changed to DROP"
+if [[ "$ICMP_NEEDS_CHANGE" == true ]]; then
+    # Backup only if we need to change
+    BACKUP_FILE="${BEFORE_RULES}.backup.$(date +%Y%m%d%H%M%S)"
+    cp "$BEFORE_RULES" "$BACKUP_FILE"
+    log "Backup: $BACKUP_FILE"
+
+    # Replace ACCEPT with DROP for ICMP rules
+    sed -i 's/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-input -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
+
+    sed -i 's/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
+    sed -i 's/-A ufw-before-forward -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
+
+    # Add source-quench DROP if not exists
+    if ! grep -q "icmp-type source-quench" "$BEFORE_RULES"; then
+        sed -i '/-A ufw-before-input -p icmp --icmp-type echo-request/a -A ufw-before-input -p icmp --icmp-type source-quench -j DROP' "$BEFORE_RULES"
+    fi
+
+    log "ICMP rules changed to DROP"
+else
+    log "ICMP already configured (skipped)"
+fi
 
 # Enable UFW
 echo ""
