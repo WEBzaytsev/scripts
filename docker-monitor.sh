@@ -42,7 +42,7 @@ acquire_lock() {
   if [[ -f "$LOCK_FILE" ]]; then
     local pid
     pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
-    if [[ -n "${pid}" ]] && kill -0 "$pid" 2>/dev/null; then
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       die "Another instance is running (PID: $pid). If stuck, remove: $LOCK_FILE"
     fi
     rm -f "$LOCK_FILE"
@@ -136,6 +136,10 @@ valid_ssh_key() {
     echo "$k" | ssh-keygen -l -f - >/dev/null 2>&1 && return 0
   fi
   return 1
+}
+
+valid_url() {
+  [[ "$1" =~ ^https?:// ]]
 }
 
 usage() {
@@ -267,8 +271,10 @@ main() {
   # HUB_URL is REQUIRED
   while true; do
     prompt_string beszel_hub_url "Beszel hub URL (required, e.g. https://hub.example.com)" "$beszel_hub_url" || die "Failed to get hub URL"
-    [[ -n "$beszel_hub_url" ]] && break
-    warn "Hub URL cannot be empty."
+    if [[ -n "$beszel_hub_url" ]] && valid_url "$beszel_hub_url"; then
+      break
+    fi
+    warn "Invalid HUB_URL. Must start with http:// or https://"
     beszel_hub_url=""
   done
 
