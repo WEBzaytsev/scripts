@@ -51,6 +51,22 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 
 ---
 
+## Docker Monitor (dozzle + beszel)
+
+Интерактивная настройка docker compose для dozzle и beszel агентов:
+
+```bash
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-monitor.sh?v=$(date +%s)" | sudo bash
+```
+
+С указанием hub URL через флаг:
+
+```bash
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-monitor.sh?v=$(date +%s)" | sudo bash -s -- --hub-url "https://monitor.example.com"
+```
+
+---
+
 ## UFW Firewall
 
 ```bash
