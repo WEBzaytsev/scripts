@@ -1,5 +1,6 @@
 #!/bin/sh
 # enable-bbr.sh — robust TCP BBR enabler (idempotent, with checks)
+# Polished: fixes apt-get update usage, avoids double sysctl --system, better fallbacks & diagnostics.
 set -eu
 
 log()  { printf '%s\n' "[INFO] $*"; }
@@ -24,13 +25,15 @@ pm_detect() {
 }
 
 install_procps_if_needed() {
+  # sysctl is provided by procps/procps-ng
   if command -v sysctl >/dev/null 2>&1; then return 0; fi
 
   pm="$(pm_detect)"
   log "sysctl not found, trying to install it (package: procps / procps-ng)…"
   case "$pm" in
     apt)
-      apt-get update -y
+      # NOTE: apt-get update does NOT support -y
+      apt-get update
       apt-get install -y procps
       ;;
     dnf)
@@ -46,6 +49,7 @@ install_procps_if_needed() {
       die "Unsupported package manager. Install sysctl (procps/procps-ng) manually."
       ;;
   esac
+
   command -v sysctl >/dev/null 2>&1 || die "sysctl still missing after install"
 }
 
@@ -74,7 +78,6 @@ ensure_kv_in_file() {
   tmp="$(mktemp "${file}.tmp.XXXXXX")"
   if [ -f "$file" ]; then
     # Delete any existing lines for the key (with optional spaces)
-    # and keep the rest.
     awk -v k="$key" '
       $0 ~ "^[[:space:]]*"k"[[:space:]]*=" { next }
       { print }
@@ -83,25 +86,27 @@ ensure_kv_in_file() {
     : >"$tmp"
   fi
 
-  # Ensure newline at end and append our setting
   printf '%s=%s\n' "$key" "$val" >>"$tmp"
   chmod 0644 "$tmp" || true
   mv -f "$tmp" "$file"
 }
 
 sysctl_apply() {
-  # Prefer --system (loads /etc/sysctl.d/*.conf), else fallback
+  # Prefer --system (loads /etc/sysctl.d/*.conf), else fallback.
+  # Provide meaningful error output.
   if sysctl --system >/dev/null 2>&1; then
-    sysctl --system >/dev/null 2>&1 || die "sysctl --system failed"
-  elif [ -f /etc/sysctl.conf ]; then
-    sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || die "sysctl -p /etc/sysctl.conf failed"
-  else
-    die "No way to apply sysctl settings (no --system and no /etc/sysctl.conf)"
+    return 0
   fi
+
+  if [ -f /etc/sysctl.conf ]; then
+    sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || die "sysctl apply failed (sysctl --system and sysctl -p /etc/sysctl.conf)."
+    return 0
+  fi
+
+  die "No way to apply sysctl settings (sysctl --system failed and /etc/sysctl.conf missing)."
 }
 
 get_sysctl() {
-  # prints value only
   sysctl -n "$1" 2>/dev/null || return 1
 }
 
@@ -112,32 +117,43 @@ try_modprobe_bbr() {
 }
 
 bbr_available() {
-  # Best signal: bbr listed in tcp_available_congestion_control
   avail="$(get_sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")"
   echo "$avail" | grep -qw bbr
+}
+
+dump_debug() {
+  # Helpful diagnostics for containers / restricted environments
+  warn "Diagnostics:"
+  warn "  kernel: $(uname -r 2>/dev/null || echo unknown)"
+  warn "  available_cc: $(get_sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null || echo unknown)"
+  warn "  current_cc: $(get_sysctl net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  warn "  default_qdisc: $(get_sysctl net.core.default_qdisc 2>/dev/null || echo unknown)"
+  if command -v lsmod >/dev/null 2>&1; then
+    warn "  lsmod tcp_bbr: $(lsmod 2>/dev/null | awk '$1=="tcp_bbr"{print "loaded"; found=1} END{if(!found)print "not_loaded"}')"
+  fi
 }
 
 main() {
   is_root || die "Run as root (sudo)."
 
   install_procps_if_needed
+
   need_cmd sysctl
   need_cmd awk
   need_cmd grep
   need_cmd date
   need_cmd mktemp
+  need_cmd uname
 
-  # Basic kernel interface check
   [ -r /proc/sys/net/ipv4/tcp_congestion_control ] || die "Kernel sysctl interface missing: /proc/sys/net/ipv4/tcp_congestion_control"
 
   try_modprobe_bbr
 
   if ! bbr_available; then
-    krel="$(uname -r 2>/dev/null || echo unknown)"
-    die "BBR is not available on this kernel ($krel). You may need a newer kernel that includes tcp_bbr."
+    dump_debug
+    die "BBR is not available on this kernel. You may need a newer kernel that includes tcp_bbr (or you may be inside a restricted container)."
   fi
 
-  # Decide where to persist settings
   conf_d="/etc/sysctl.d"
   conf_file="${conf_d}/99-bbr.conf"
   fallback="/etc/sysctl.conf"
@@ -146,7 +162,6 @@ main() {
   desired_cc="bbr"
 
   if [ -d "$conf_d" ]; then
-    # Write clean dedicated file (best practice)
     if [ -f "$conf_file" ]; then backup_file "$conf_file"; fi
     log "Writing ${conf_file}…"
     atomic_write "$conf_file" <<EOF
@@ -155,7 +170,6 @@ net.core.default_qdisc=${desired_qdisc}
 net.ipv4.tcp_congestion_control=${desired_cc}
 EOF
   else
-    # Fallback: edit /etc/sysctl.conf idempotently
     warn "/etc/sysctl.d not found; falling back to ${fallback}"
     [ -f "$fallback" ] || : >"$fallback"
     backup_file "$fallback"
@@ -164,13 +178,16 @@ EOF
   fi
 
   log "Applying sysctl settings…"
-  sysctl_apply
+  if ! sysctl_apply; then
+    dump_debug
+    die "Failed to apply sysctl settings."
+  fi
 
-  # Validate
   got_cc="$(get_sysctl net.ipv4.tcp_congestion_control || echo "")"
   got_qdisc="$(get_sysctl net.core.default_qdisc || echo "")"
 
   if [ "$got_cc" != "$desired_cc" ]; then
+    dump_debug
     die "Validation failed: net.ipv4.tcp_congestion_control is '$got_cc' (expected '$desired_cc')"
   fi
 

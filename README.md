@@ -1,27 +1,52 @@
 ## BBR
 
 ```bash
-curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh | sudo sh
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh?v=$(date +%s)" | sudo sh
 ```
 
 ```bash
-wget -qO- https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh | sudo sh
+wget -qO- "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/enable-bbr.sh?v=$(date +%s)" | sudo sh
 ```
 
 ---
 
 ## SSH Config
 
-Ручной ввод порта:
+### Интерактивная настройка порта
 
 ```bash
-curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh | sudo bash
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash
 ```
 
-Автоматический случайный порт:
+### Только порт (неинтерактивно)
 
 ```bash
-curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh | sudo bash -s -- --random
+# Фиксированный порт
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- --port 22222 --yes
+
+# Случайный порт
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- --random-port --yes
+```
+
+### Добавление SSH ключа (только авторизация по ключу)
+
+```bash
+KEY="ssh-ed25519 AAAAC3..." 
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY"
+```
+
+### Ключ + случайный порт (неинтерактивно)
+
+```bash
+KEY="ssh-ed25519 AAAAC3..." 
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --random-port --yes
+```
+
+### Ключ + фиксированный порт (неинтерактивно)
+
+```bash
+KEY="ssh-ed25519 AAAAC3..." 
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --port 22222 --yes
 ```
 
 ---
@@ -29,70 +54,72 @@ curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh | su
 ## UFW Firewall
 
 ```bash
-curl -sSL https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh -o ufw-config.sh && sudo bash ufw-config.sh
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" -o ufw-config.sh && sudo bash ufw-config.sh
 ```
 
 ```bash
-wget -qO ufw-config.sh https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh && sudo bash ufw-config.sh
+wget -qO ufw-config.sh "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" && sudo bash ufw-config.sh
 ```
 
 ---
 
+## Генерация SSH ключа
+
 ```bash
+ssh-keygen -t ed25519 -C "your_email@example.com"
+```
 
-ssh-keygen  -t  ed25519  
+Показать публичный ключ:
 
+```bash
+cat ~/.ssh/id_ed25519.pub
 ```
 
 ---
 
-## 2) Положить ключ на сервер
+## Ручная настройка SSH (альтернатива скрипту)
+
+### 1) Положить ключ на сервер
 
 ```bash
-
-ssh-copy-id  -i  ~/.ssh/id_ed25519.pub  USER@HOST
-
+ssh-copy-id -i ~/.ssh/id_ed25519.pub USER@HOST
 ```
 
-## 3) запретить вход по паролю
+Или через скрипт:
+
+```bash
+KEY=$(cat ~/.ssh/id_ed25519.pub)
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY"
+```
+
+### 2) Запретить вход по паролю
 
 Конфиг:
 
 ```bash
-
-sudo  nano  /etc/ssh/sshd_config
-
+sudo nano /etc/ssh/sshd_config
 ```
 
 ```text
-
 PasswordAuthentication no
-
 KbdInteractiveAuthentication no
-
 ChallengeResponseAuthentication no
-
 PubkeyAuthentication yes
-
 ```
 
-ПроверОЧКА
+Проверка:
 
 ```bash
-
-sudo  sshd  -t
-
+sudo sshd -t
 ```
 
 Применить:
 
 ```bash
-
-sudo  systemctl  restart  ssh  && sudo  systemctl  restart  sshd
-
+sudo systemctl restart ssh && sudo systemctl restart sshd
 ```
 
-## 4) Сменить SSH-порт
+### 3) Сменить SSH-порт
 
 Выберем порт, например `2222`.
 
