@@ -86,6 +86,39 @@ prompt_string() {
   done
 }
 
+port_in_use() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    if ss -H -ltn "sport = :$p" >/dev/null 2>&1; then
+      ss -H -ltn "sport = :$p" | grep -q . && return 0
+    fi
+    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\.)${p}$" && return 0
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\.)${p}$" && return 0
+  fi
+  return 1
+}
+
+rand_port() {
+  local min="${1:-10000}"
+  local max="${2:-65000}"
+  local tries=0 max_tries=120 p
+  while (( tries < max_tries )); do
+    if command -v shuf >/dev/null 2>&1; then
+      p="$(shuf -i "${min}-${max}" -n 1)"
+    else
+      p=$(( (RANDOM % (max - min + 1)) + min ))
+    fi
+    if ! port_in_use "$p"; then
+      echo "$p"
+      return 0
+    fi
+    ((tries++))
+  done
+  die "Failed to find free port after $max_tries tries"
+}
+
 prompt_port() {
   local var="$1" prompt="$2" default="${3:-}" value=""
   while true; do
@@ -103,6 +136,11 @@ prompt_port() {
 
     if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 65535 )); then
       warn "Invalid port: '$value'. Must be 1-65535."
+      continue
+    fi
+
+    if port_in_use "$value"; then
+      warn "Port $value is in use."
       continue
     fi
 
@@ -249,8 +287,22 @@ main() {
 
   # Prompt for values
   prompt_string dozzle_hostname "Dozzle hostname" "$dozzle_hostname" || die "Failed to get hostname"
-  prompt_port dozzle_port "Dozzle external port" "$dozzle_port" || die "Failed to get dozzle port"
-  prompt_port beszel_listen "Beszel listen port" "$beszel_listen" || die "Failed to get beszel listen port"
+  
+  # Dozzle port: random or manual
+  if prompt_yn "Generate random external port for Dozzle?" "y"; then
+    dozzle_port="$(rand_port)"
+    ok "Generated port: $dozzle_port"
+  else
+    prompt_port dozzle_port "Dozzle external port" "$dozzle_port" || die "Failed to get dozzle port"
+  fi
+  
+  # Beszel listen port: random or manual
+  if prompt_yn "Generate random listen port for Beszel?" "y"; then
+    beszel_listen="$(rand_port)"
+    ok "Generated port: $beszel_listen"
+  else
+    prompt_port beszel_listen "Beszel listen port" "$beszel_listen" || die "Failed to get beszel listen port"
+  fi
 
   while true; do
     prompt_string beszel_key "Beszel SSH key" "$beszel_key" || die "Failed to get beszel key"
