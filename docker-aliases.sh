@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
-# install-docker-aliases.sh — install docker aliases system-wide (idempotent)
+# docker-aliases-install.sh — system-wide docker compose aliases (bash + zsh), reliable & idempotent
+#
+# Installs:
+#   1) /etc/profile.d/docker-aliases.sh     (aliases definition, interactive only)
+#   2) ensures loading for:
+#        - bash login shells via /etc/profile (default behavior)
+#        - bash interactive non-login shells via /etc/bash.bashrc
+#        - zsh interactive shells via /etc/zsh/zshrc (if present)
+#
 # Usage:
-#   sudo ./install-docker-aliases.sh
-#   sudo ./install-docker-aliases.sh --user username   # optional: also add to user's ~/.bashrc
+#   sudo ./docker-aliases-install.sh
+#   curl -fsSL "URL?v=$(date +%s)" | sudo bash
+#
+# Optional:
+#   --uninstall   remove managed blocks
+#   --print       print generated aliases file content and exit
 
 set -euo pipefail
 
@@ -13,22 +25,14 @@ die()  { echo "[ERROR] $*" >&2; exit 1; }
 
 is_root() { [[ "${EUID}" -eq 0 ]]; }
 
-PROFILE_D_FILE="/etc/profile.d/docker-aliases.sh"
+PROFILE_D_DIR="/etc/profile.d"
+ALIASES_FILE="${PROFILE_D_DIR}/docker-aliases.sh"
+
+BASH_SYSTEM_RC="/etc/bash.bashrc"   # Debian/Ubuntu global bashrc for interactive non-login shells
+ZSH_SYSTEM_RC="/etc/zsh/zshrc"      # common global zshrc path
+
 MARKER_BEGIN="# >>> docker-aliases (managed) >>>"
 MARKER_END="# <<< docker-aliases (managed) <<<"
-
-usage() {
-  cat <<EOF
-Usage:
-  sudo $0
-  sudo $0 --user USERNAME
-
-Installs docker aliases system-wide at:
-  ${PROFILE_D_FILE}
-
-Optionally, with --user, also ensures Bash users load aliases via ~/.bashrc
-EOF
-}
 
 mk_backup() {
   local f="$1"
@@ -40,18 +44,16 @@ mk_backup() {
 
 write_atomic() {
   local dst="$1" tmp
+  mkdir -p "$(dirname "$dst")"
   tmp="$(mktemp "${dst}.tmp.XXXXXX")"
   cat >"$tmp"
   chmod 0644 "$tmp" || true
   mv -f "$tmp" "$dst"
 }
 
-# Remove managed block if present (keeps the rest intact)
 strip_managed_block() {
   local f="$1"
-  if [[ ! -f "$f" ]]; then
-    return 0
-  fi
+  [[ -f "$f" ]] || { echo ""; return 0; }
   awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
     $0==b {inblk=1; next}
     $0==e {inblk=0; next}
@@ -59,10 +61,11 @@ strip_managed_block() {
   ' "$f"
 }
 
-managed_block_content() {
+aliases_block_content() {
+  # NOTE: single-quoted heredoc to preserve quotes/backslashes exactly
   cat <<'EOF'
 # >>> docker-aliases (managed) >>>
-# Loaded for interactive shells only
+# Interactive shells only (skip non-interactive)
 case "$-" in
   *i*) ;;
   *) return 0 2>/dev/null || exit 0 ;;
@@ -91,95 +94,143 @@ alias docker-compose='docker compose'
 EOF
 }
 
-ensure_profiled_installed() {
-  local desired tmp
-  desired="$(managed_block_content)"
+ensure_aliases_file() {
+  local desired final existing_stripped
+  desired="$(aliases_block_content)"
 
-  if [[ -f "$PROFILE_D_FILE" ]]; then
-    tmp="$(strip_managed_block "$PROFILE_D_FILE")"
+  if [[ -f "$ALIASES_FILE" ]]; then
+    existing_stripped="$(strip_managed_block "$ALIASES_FILE")"
   else
-    tmp=""
+    existing_stripped=""
   fi
 
-  # normalize: trim trailing whitespace lines
-  tmp="$(printf "%s\n" "$tmp" | sed '/^[[:space:]]*$/N;/^\n$/D')"
-
-  local final
-  if [[ -n "${tmp//[[:space:]]/}" ]]; then
-    final="${tmp}"$'\n\n'"${desired}"$'\n'
+  # Keep any custom content outside our markers, then append our managed block.
+  if [[ -n "${existing_stripped//[[:space:]]/}" ]]; then
+    final="${existing_stripped}"$'\n\n'"${desired}"$'\n'
   else
     final="${desired}"$'\n'
   fi
 
   # Write only if changed
-  if [[ -f "$PROFILE_D_FILE" ]] && cmp -s <(printf "%s" "$final") "$PROFILE_D_FILE"; then
-    ok "Already up to date: $PROFILE_D_FILE"
+  if [[ -f "$ALIASES_FILE" ]] && cmp -s <(printf "%s" "$final") "$ALIASES_FILE"; then
+    ok "Already up to date: $ALIASES_FILE"
     return 0
   fi
 
-  mk_backup "$PROFILE_D_FILE"
-  write_atomic "$PROFILE_D_FILE" <<<"$final"
-  ok "Installed: $PROFILE_D_FILE"
+  mk_backup "$ALIASES_FILE"
+  write_atomic "$ALIASES_FILE" <<<"$final"
+  chmod 0644 "$ALIASES_FILE" || true
+  ok "Installed: $ALIASES_FILE"
 }
 
-ensure_user_bashrc_sources_profiled() {
-  local user="$1"
-  local home
-  home="$(eval echo "~$user")"
-  [[ -d "$home" ]] || die "Home dir not found for user: $user"
+ensure_bash_loads_profiled() {
+  # Ensure interactive non-login bash loads /etc/profile.d scripts too.
+  # On Debian/Ubuntu, /etc/bash.bashrc is sourced for interactive shells.
+  [[ -f "$BASH_SYSTEM_RC" ]] || { warn "No $BASH_SYSTEM_RC found; skipping bash patch."; return 0; }
 
-  local bashrc="${home}/.bashrc"
-  local line='[ -f /etc/profile ] && . /etc/profile'
-
-  # If .bashrc doesn't exist, create it
-  if [[ ! -f "$bashrc" ]]; then
-    touch "$bashrc"
-    chown "$user:$user" "$bashrc" 2>/dev/null || true
+  local line='[[ -f /etc/profile.d/docker-aliases.sh ]] && . /etc/profile.d/docker-aliases.sh'
+  if grep -Fqx "$line" "$BASH_SYSTEM_RC" 2>/dev/null; then
+    ok "Bash loader already present: $BASH_SYSTEM_RC"
+    return 0
   fi
 
-  # Add line only if missing (some distros already source /etc/profile)
-  if ! grep -Fqx "$line" "$bashrc" 2>/dev/null; then
-    mk_backup "$bashrc"
-    printf "\n# Ensure /etc/profile.d scripts are loaded\n%s\n" "$line" >>"$bashrc"
-    chown "$user:$user" "$bashrc" 2>/dev/null || true
-    ok "Updated: $bashrc"
+  mk_backup "$BASH_SYSTEM_RC"
+  printf "\n# Load docker aliases (managed)\n%s\n" "$line" >>"$BASH_SYSTEM_RC"
+  ok "Patched: $BASH_SYSTEM_RC"
+}
+
+ensure_zsh_loads_profiled() {
+  # Ensure interactive zsh loads the same aliases file.
+  [[ -f "$ZSH_SYSTEM_RC" ]] || { warn "No $ZSH_SYSTEM_RC found; skipping zsh patch."; return 0; }
+
+  local line='[[ -f /etc/profile.d/docker-aliases.sh ]] && source /etc/profile.d/docker-aliases.sh'
+  if grep -Fqx "$line" "$ZSH_SYSTEM_RC" 2>/dev/null; then
+    ok "Zsh loader already present: $ZSH_SYSTEM_RC"
+    return 0
+  fi
+
+  mk_backup "$ZSH_SYSTEM_RC"
+  printf "\n# Load docker aliases (managed)\n%s\n" "$line" >>"$ZSH_SYSTEM_RC"
+  ok "Patched: $ZSH_SYSTEM_RC"
+}
+
+uninstall() {
+  info "Uninstalling managed blocks..."
+
+  if [[ -f "$ALIASES_FILE" ]]; then
+    local stripped
+    stripped="$(strip_managed_block "$ALIASES_FILE")"
+    mk_backup "$ALIASES_FILE"
+    write_atomic "$ALIASES_FILE" <<<"$stripped"
+    ok "Removed managed block from: $ALIASES_FILE"
   else
-    ok "User already sources /etc/profile: $bashrc"
+    ok "No aliases file: $ALIASES_FILE"
   fi
+
+  # Remove loader lines (best-effort, only our exact lines)
+  if [[ -f "$BASH_SYSTEM_RC" ]]; then
+    mk_backup "$BASH_SYSTEM_RC"
+    sed -i '\|^\[\[ -f /etc/profile\.d/docker-aliases\.sh \]\] && \. /etc/profile\.d/docker-aliases\.sh$|d' "$BASH_SYSTEM_RC" || true
+    ok "Cleaned loader line from: $BASH_SYSTEM_RC"
+  fi
+
+  if [[ -f "$ZSH_SYSTEM_RC" ]]; then
+    mk_backup "$ZSH_SYSTEM_RC"
+    sed -i '\|^\[\[ -f /etc/profile\.d/docker-aliases\.sh \]\] && source /etc/profile\.d/docker-aliases\.sh$|d' "$ZSH_SYSTEM_RC" || true
+    ok "Cleaned loader line from: $ZSH_SYSTEM_RC"
+  fi
+
+  ok "Uninstall complete."
 }
 
 main() {
   is_root || die "Run as root (sudo)."
 
-  local target_user=""
+  local do_uninstall="false"
+  local do_print="false"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --user)
-        shift || true
-        [[ $# -gt 0 ]] || die "--user requires a username"
-        target_user="$1"
-        shift || true
-        ;;
+      --uninstall) do_uninstall="true"; shift || true ;;
+      --print)     do_print="true"; shift || true ;;
       -h|--help)
-        usage
+        cat <<EOF
+Usage:
+  sudo $0
+  sudo $0 --uninstall
+  sudo $0 --print
+
+What it does:
+  - installs aliases to: $ALIASES_FILE
+  - ensures bash interactive shells load it via: $BASH_SYSTEM_RC
+  - ensures zsh interactive shells load it via: $ZSH_SYSTEM_RC (if exists)
+EOF
         exit 0
         ;;
-      *)
-        die "Unknown option: $1"
-        ;;
+      *) die "Unknown option: $1" ;;
     esac
   done
 
-  mkdir -p /etc/profile.d
-  ensure_profiled_installed
-
-  if [[ -n "$target_user" ]]; then
-    ensure_user_bashrc_sources_profiled "$target_user"
+  if [[ "$do_print" == "true" ]]; then
+    aliases_block_content
+    exit 0
   fi
 
-  info "How to apply in current session:"
-  echo "  source $PROFILE_D_FILE"
-  echo "  # or re-login / open new terminal"
+  if [[ "$do_uninstall" == "true" ]]; then
+    uninstall
+    exit 0
+  fi
+
+  mkdir -p "$PROFILE_D_DIR"
+  ensure_aliases_file
+  ensure_bash_loads_profiled
+  ensure_zsh_loads_profiled
+
+  echo
+  info "Apply in current session:"
+  echo "  source /etc/profile.d/docker-aliases.sh"
+  echo "Test:"
+  echo "  type dcpu"
   ok "Done."
 }
 
