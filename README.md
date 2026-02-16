@@ -51,6 +51,22 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 
 ---
 
+## Docker Aliases
+
+Установка docker-команд (dc, dcu, dcud, dcub, dcd, dcl, dcps и др.) в /etc/profile.d:
+
+```bash
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-aliases.sh?v=$(date +%s)" | sudo bash
+```
+
+С подключением алиасов для пользователя (добавляет source /etc/profile в ~/.bashrc):
+
+```bash
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-aliases.sh?v=$(date +%s)" | sudo bash -s -- --user "$USER"
+```
+
+---
+
 ## Docker Monitor (dozzle + beszel)
 
 Интерактивная настройка docker compose для dozzle и beszel агентов:
