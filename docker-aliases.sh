@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# docker-aliases-install.sh — system-wide docker compose aliases (bash + zsh), reliable & idempotent
+# docker-aliases-install.sh — system-wide docker compose aliases, reliable across bash/zsh modes
 #
-# Installs:
-#   1) /etc/profile.d/docker-aliases.sh     (aliases definition, interactive only)
-#   2) ensures loading for:
-#        - bash login shells via /etc/profile (default behavior)
-#        - bash interactive non-login shells via /etc/bash.bashrc
-#        - zsh interactive shells via /etc/zsh/zshrc (if present)
+# Install:
+#   - /etc/profile.d/docker-aliases.sh  (aliases definition)
+#   - /etc/bash.bashrc                  (loads aliases for interactive non-login bash)
+#   - /etc/zsh/zshrc                    (loads aliases for interactive zsh, if present)
 #
 # Usage:
 #   sudo ./docker-aliases-install.sh
 #   curl -fsSL "URL?v=$(date +%s)" | sudo bash
 #
-# Optional:
-#   --uninstall   remove managed blocks
-#   --print       print generated aliases file content and exit
+# Options:
+#   --uninstall   remove managed blocks/lines
+#   --print       print generated aliases block and exit
 
 set -euo pipefail
 
@@ -28,11 +26,14 @@ is_root() { [[ "${EUID}" -eq 0 ]]; }
 PROFILE_D_DIR="/etc/profile.d"
 ALIASES_FILE="${PROFILE_D_DIR}/docker-aliases.sh"
 
-BASH_SYSTEM_RC="/etc/bash.bashrc"   # Debian/Ubuntu global bashrc for interactive non-login shells
-ZSH_SYSTEM_RC="/etc/zsh/zshrc"      # common global zshrc path
+BASH_SYSTEM_RC="/etc/bash.bashrc"
+ZSH_SYSTEM_RC="/etc/zsh/zshrc"
 
 MARKER_BEGIN="# >>> docker-aliases (managed) >>>"
 MARKER_END="# <<< docker-aliases (managed) <<<"
+
+BASH_LOADER_LINE='[[ -f /etc/profile.d/docker-aliases.sh ]] && . /etc/profile.d/docker-aliases.sh'
+ZSH_LOADER_LINE='[[ -f /etc/profile.d/docker-aliases.sh ]] && source /etc/profile.d/docker-aliases.sh'
 
 mk_backup() {
   local f="$1"
@@ -62,7 +63,6 @@ strip_managed_block() {
 }
 
 aliases_block_content() {
-  # NOTE: single-quoted heredoc to preserve quotes/backslashes exactly
   cat <<'EOF'
 # >>> docker-aliases (managed) >>>
 # Interactive shells only (skip non-interactive)
@@ -95,23 +95,21 @@ EOF
 }
 
 ensure_aliases_file() {
-  local desired final existing_stripped
+  local desired final outside
   desired="$(aliases_block_content)"
 
   if [[ -f "$ALIASES_FILE" ]]; then
-    existing_stripped="$(strip_managed_block "$ALIASES_FILE")"
+    outside="$(strip_managed_block "$ALIASES_FILE")"
   else
-    existing_stripped=""
+    outside=""
   fi
 
-  # Keep any custom content outside our markers, then append our managed block.
-  if [[ -n "${existing_stripped//[[:space:]]/}" ]]; then
-    final="${existing_stripped}"$'\n\n'"${desired}"$'\n'
+  if [[ -n "${outside//[[:space:]]/}" ]]; then
+    final="${outside}"$'\n\n'"${desired}"$'\n'
   else
     final="${desired}"$'\n'
   fi
 
-  # Write only if changed
   if [[ -f "$ALIASES_FILE" ]] && cmp -s <(printf "%s" "$final") "$ALIASES_FILE"; then
     ok "Already up to date: $ALIASES_FILE"
     return 0
@@ -123,39 +121,34 @@ ensure_aliases_file() {
   ok "Installed: $ALIASES_FILE"
 }
 
-ensure_bash_loads_profiled() {
-  # Ensure interactive non-login bash loads /etc/profile.d scripts too.
-  # On Debian/Ubuntu, /etc/bash.bashrc is sourced for interactive shells.
-  [[ -f "$BASH_SYSTEM_RC" ]] || { warn "No $BASH_SYSTEM_RC found; skipping bash patch."; return 0; }
-
-  local line='[[ -f /etc/profile.d/docker-aliases.sh ]] && . /etc/profile.d/docker-aliases.sh'
-  if grep -Fqx "$line" "$BASH_SYSTEM_RC" 2>/dev/null; then
-    ok "Bash loader already present: $BASH_SYSTEM_RC"
-    return 0
-  fi
-
-  mk_backup "$BASH_SYSTEM_RC"
-  printf "\n# Load docker aliases (managed)\n%s\n" "$line" >>"$BASH_SYSTEM_RC"
-  ok "Patched: $BASH_SYSTEM_RC"
+ensure_line_once() {
+  local file="$1" line="$2"
+  [[ -f "$file" ]] || return 1
+  grep -Fqx "$line" "$file" 2>/dev/null && return 0
+  mk_backup "$file"
+  printf "\n# Load docker aliases (managed)\n%s\n" "$line" >>"$file"
+  ok "Patched: $file"
+  return 0
 }
 
-ensure_zsh_loads_profiled() {
-  # Ensure interactive zsh loads the same aliases file.
-  [[ -f "$ZSH_SYSTEM_RC" ]] || { warn "No $ZSH_SYSTEM_RC found; skipping zsh patch."; return 0; }
-
-  local line='[[ -f /etc/profile.d/docker-aliases.sh ]] && source /etc/profile.d/docker-aliases.sh'
-  if grep -Fqx "$line" "$ZSH_SYSTEM_RC" 2>/dev/null; then
-    ok "Zsh loader already present: $ZSH_SYSTEM_RC"
-    return 0
+install_loaders() {
+  # bash: required for your case
+  if [[ -f "$BASH_SYSTEM_RC" ]]; then
+    ensure_line_once "$BASH_SYSTEM_RC" "$BASH_LOADER_LINE" || true
+  else
+    warn "No $BASH_SYSTEM_RC found; bash non-login shells may not load aliases automatically."
   fi
 
-  mk_backup "$ZSH_SYSTEM_RC"
-  printf "\n# Load docker aliases (managed)\n%s\n" "$line" >>"$ZSH_SYSTEM_RC"
-  ok "Patched: $ZSH_SYSTEM_RC"
+  # zsh: best effort
+  if [[ -f "$ZSH_SYSTEM_RC" ]]; then
+    ensure_line_once "$ZSH_SYSTEM_RC" "$ZSH_LOADER_LINE" || true
+  else
+    warn "No $ZSH_SYSTEM_RC found; skipping zsh global rc patch."
+  fi
 }
 
 uninstall() {
-  info "Uninstalling managed blocks..."
+  info "Uninstalling managed blocks/lines..."
 
   if [[ -f "$ALIASES_FILE" ]]; then
     local stripped
@@ -167,7 +160,6 @@ uninstall() {
     ok "No aliases file: $ALIASES_FILE"
   fi
 
-  # Remove loader lines (best-effort, only our exact lines)
   if [[ -f "$BASH_SYSTEM_RC" ]]; then
     mk_backup "$BASH_SYSTEM_RC"
     sed -i '\|^\[\[ -f /etc/profile\.d/docker-aliases\.sh \]\] && \. /etc/profile\.d/docker-aliases\.sh$|d' "$BASH_SYSTEM_RC" || true
@@ -181,6 +173,22 @@ uninstall() {
   fi
 
   ok "Uninstall complete."
+}
+
+post_check() {
+  info "Post-check: bash -ic 'type dcpu'"
+  if bash -ic 'type dcpu' >/dev/null 2>&1; then
+    ok "Verified: aliases load in interactive non-login bash"
+  else
+    warn "Aliases did NOT load in 'bash -ic'."
+    warn "Diagnostics:"
+    warn "  - Does /etc/bash.bashrc exist and include the loader line?"
+    warn "  - Is /etc/profile.d/docker-aliases.sh readable?"
+    warn "Try:"
+    echo "  grep -nF \"$BASH_LOADER_LINE\" $BASH_SYSTEM_RC || true"
+    echo "  ls -l $ALIASES_FILE"
+    die "Post-check failed"
+  fi
 }
 
 main() {
@@ -200,10 +208,10 @@ Usage:
   sudo $0 --uninstall
   sudo $0 --print
 
-What it does:
-  - installs aliases to: $ALIASES_FILE
-  - ensures bash interactive shells load it via: $BASH_SYSTEM_RC
-  - ensures zsh interactive shells load it via: $ZSH_SYSTEM_RC (if exists)
+Installs:
+  - $ALIASES_FILE
+  - ensures bash loads it via: $BASH_SYSTEM_RC
+  - ensures zsh loads it via: $ZSH_SYSTEM_RC (if present)
 EOF
         exit 0
         ;;
@@ -223,14 +231,12 @@ EOF
 
   mkdir -p "$PROFILE_D_DIR"
   ensure_aliases_file
-  ensure_bash_loads_profiled
-  ensure_zsh_loads_profiled
+  install_loaders
+  post_check
 
   echo
-  info "Apply in current session:"
+  info "Apply in current session (optional):"
   echo "  source /etc/profile.d/docker-aliases.sh"
-  echo "Test:"
-  echo "  type dcpu"
   ok "Done."
 }
 
