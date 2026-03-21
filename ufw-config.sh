@@ -92,13 +92,7 @@ XRAY_CONFIG_PATHS=(
     "/etc/xray/config.json"
     "/usr/local/etc/xray/config.json"
 )
-XRAY_ENV_PATHS=(
-    "/opt/remnanode/.env"
-    "/opt/remnawave/.env"
-    "/usr/local/x-ui/.env"
-    "/etc/x-ui/.env"
-    "/root/x-ui/.env"
-)
+XRAY_ENV_SEARCH_DIRS=("/opt" "/root" "/etc" "/usr/local")
 
 extract_ports_from_json() {
     local f="$1"
@@ -144,13 +138,15 @@ for XRAY_CFG in "${XRAY_CONFIG_PATHS[@]}"; do
     fi
 done
 
-# Xray from .env (3x-ui, remnanode, etc.): NODE_PORT (XTLS_API_PORT is internal, skipped)
-for XRAY_ENV in "${XRAY_ENV_PATHS[@]}"; do
-    if [[ -f "$XRAY_ENV" ]] && grep -qE "XTLS_API_PORT|SECRET_KEY" "$XRAY_ENV" 2>/dev/null; then
-        p=$(grep -E "^NODE_PORT=" "$XRAY_ENV" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+# Xray from .env (ищет в /opt, /root, /etc, /usr/local): NODE_PORT, SELF_STEAL_PORT
+while IFS= read -r xray_env; do
+    [[ -f "$xray_env" ]] || continue
+    grep -qE "^(NODE_PORT|SELF_STEAL_PORT|XTLS_API_PORT|SECRET_KEY)=" "$xray_env" 2>/dev/null || continue
+    for var in NODE_PORT SELF_STEAL_PORT; do
+        p=$(grep -E "^${var}=" "$xray_env" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
         [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
-    fi
-done
+    done
+done < <(find "${XRAY_ENV_SEARCH_DIRS[@]}" -name ".env" -type f 2>/dev/null)
 
 # Xray in Docker: get host ports from running containers
 if command -v docker &>/dev/null; then
