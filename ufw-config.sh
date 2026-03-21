@@ -84,19 +84,27 @@ if command -v openvpn &>/dev/null || systemctl list-units --type=service 2>/dev/
     OPENVPN_INSTALLED=true
 fi
 
-# --- Detect Remnawave/Remnanode port ---
+# --- Detect Remnawave/Remnanode ports ---
 REMNAWAVE_PORT=""
+REMNAWAVE_EXTRA_PORTS=()
 REMNAWAVE_PATHS=("/opt/remnanode/.env" "/opt/remnawave/.env")
 
 for env_file in "${REMNAWAVE_PATHS[@]}"; do
-    if [[ -f "$env_file" ]]; then
+    [[ -f "$env_file" ]] || continue
+    if [[ -z "$REMNAWAVE_PORT" ]]; then
         p=$(grep -E "^NODE_PORT=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
         if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
             REMNAWAVE_PORT="$p"
             echo -e "Remnanode port: ${GREEN}$REMNAWAVE_PORT${NC} (from $env_file)"
-            break
         fi
     fi
+    for var in SELF_STEAL_PORT; do
+        p=$(grep -E "^${var}=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+        if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
+            REMNAWAVE_EXTRA_PORTS+=("$p")
+            echo -e "${var}: ${GREEN}$p${NC} (from $env_file)"
+        fi
+    done
 done
 
 # --- Detect Xray ports ---
@@ -153,11 +161,14 @@ _is_remnawave_path() {
 while IFS= read -r env_file; do
     [[ -f "$env_file" ]] || continue
     _is_remnawave_path "$env_file" && continue
-    grep -qE "^XTLS_API_PORT=" "$env_file" 2>/dev/null || continue
-    for var in NODE_PORT SELF_STEAL_PORT; do
-        p=$(grep -E "^${var}=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+    grep -qE "^(XTLS_API_PORT|SELF_STEAL_PORT)=" "$env_file" 2>/dev/null || continue
+    # NODE_PORT only from files that also have XTLS_API_PORT (to avoid random services)
+    if grep -qE "^XTLS_API_PORT=" "$env_file" 2>/dev/null; then
+        p=$(grep -E "^NODE_PORT=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
         [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
-    done
+    fi
+    p=$(grep -E "^SELF_STEAL_PORT=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+    [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
 done < <(find /opt /root /etc /usr/local -maxdepth 3 -name ".env" -type f 2>/dev/null)
 
 # 3. From Docker containers named/imaged as xray/v2ray
@@ -194,7 +205,9 @@ else
     echo "  [ ] Xray: not detected"
 fi
 if [[ -n "$REMNAWAVE_PORT" ]]; then
-    echo "  [x] Allow Remnawave API: $REMNAWAVE_PORT/tcp (detected)"
+    extra=""
+    [[ ${#REMNAWAVE_EXTRA_PORTS[@]} -gt 0 ]] && extra=" + ${REMNAWAVE_EXTRA_PORTS[*]}"
+    echo "  [x] Allow Remnawave: $REMNAWAVE_PORT/tcp${extra} (detected)"
 else
     echo "  [ ] Remnawave: not detected"
 fi
