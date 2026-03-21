@@ -31,6 +31,22 @@ check_cmd grep
 check_cmd ss
 check_cmd awk
 
+# Idempotent: add rule only if not already present
+ufw_allow_if_needed() {
+    local rule="$1"
+    local comment="${2:-}"
+    if ufw status 2>/dev/null | grep "ALLOW" | grep -qF "${rule}"; then
+        log "Already allowed: $rule (skipped)"
+    else
+        if [[ -n "$comment" ]]; then
+            ufw allow "$rule" comment "$comment" >/dev/null 2>&1
+        else
+            ufw allow "$rule" >/dev/null 2>&1
+        fi
+        log "Allowed $rule"
+    fi
+}
+
 # Install UFW if not present
 if ! command -v ufw &>/dev/null; then
     warn "UFW not installed. Installing..."
@@ -232,40 +248,39 @@ log "Default policies set (deny incoming, allow outgoing)"
 # Allow SSH first! Critical!
 echo -e "${YELLOW}Allowing SSH...${NC}"
 if [[ "$SSH_PORT" == "22" ]]; then
-    ufw allow OpenSSH >/dev/null 2>&1
-    log "Allowed OpenSSH (port 22)"
+    if ufw status 2>/dev/null | grep "ALLOW" | grep -qE "22/tcp|OpenSSH"; then
+        log "Already allowed: OpenSSH (skipped)"
+    else
+        ufw allow OpenSSH >/dev/null 2>&1
+        log "Allowed OpenSSH (port 22)"
+    fi
 else
-    ufw allow "$SSH_PORT/tcp" comment "SSH" >/dev/null 2>&1
-    log "Allowed SSH on port $SSH_PORT"
+    ufw_allow_if_needed "$SSH_PORT/tcp" "SSH"
 fi
 
 # Allow HTTPS/VPN port
 echo -e "${YELLOW}Allowing HTTPS/VPN...${NC}"
-ufw allow 443/tcp comment "HTTPS/VPN" >/dev/null 2>&1
-log "Allowed 443/tcp"
+ufw_allow_if_needed "443/tcp" "HTTPS/VPN"
 
 # Allow Xray ports if detected
 if [[ ${#XRAY_PORTS_UNIQ[@]} -gt 0 ]]; then
     echo -e "${YELLOW}Allowing Xray ports...${NC}"
     for p in "${XRAY_PORTS_UNIQ[@]}"; do
-        ufw allow "$p/tcp" comment "Xray" >/dev/null 2>&1
-        ufw allow "$p/udp" comment "Xray" >/dev/null 2>&1
-        log "Allowed $p/tcp,udp (Xray)"
+        ufw_allow_if_needed "$p/tcp" "Xray"
+        ufw_allow_if_needed "$p/udp" "Xray"
     done
 fi
 
 # Allow Remnawave API if detected
 if [[ -n "$REMNAWAVE_PORT" ]]; then
     echo -e "${YELLOW}Allowing Remnawave API...${NC}"
-    ufw allow "$REMNAWAVE_PORT/tcp" comment "Remnawave API" >/dev/null 2>&1
-    log "Allowed $REMNAWAVE_PORT/tcp (Remnawave)"
+    ufw_allow_if_needed "$REMNAWAVE_PORT/tcp" "Remnawave API"
 fi
 
 # Allow OpenVPN if installed
 if $OPENVPN_INSTALLED; then
     echo -e "${YELLOW}Allowing OpenVPN...${NC}"
-    ufw allow 1194/udp comment "OpenVPN" >/dev/null 2>&1
-    log "Allowed 1194/udp (OpenVPN)"
+    ufw_allow_if_needed "1194/udp" "OpenVPN"
 fi
 
 # Block ICMP (ping)
