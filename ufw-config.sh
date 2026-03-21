@@ -86,6 +86,100 @@ if command -v openvpn &>/dev/null || systemctl list-units --type=service 2>/dev/
     OPENVPN_INSTALLED=true
 fi
 
+# Detect Xray ports (host config, .env, or Docker)
+XRAY_PORTS=()
+XRAY_CONFIG_PATHS=(
+    "/etc/xray/config.json"
+    "/usr/local/etc/xray/config.json"
+)
+XRAY_ENV_PATHS=(
+    "/opt/remnanode/.env"
+    "/opt/remnawave/.env"
+    "/usr/local/x-ui/.env"
+    "/etc/x-ui/.env"
+    "/root/x-ui/.env"
+)
+
+extract_ports_from_json() {
+    local f="$1"
+    [[ ! -f "$f" ]] && return
+    if command -v jq &>/dev/null; then
+        jq -r '(.inbounds // [])[].port | select(. != null) | if type == "number" then tostring else . end' "$f" 2>/dev/null
+    else
+        { grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+'
+          grep -oE '"port"[[:space:]]*:[[:space:]]*"[^"]+"' "$f" 2>/dev/null | sed -n 's/.*"\([^"]*\)"$/\1/p'; }
+    fi
+}
+
+expand_port_spec() {
+    local spec="$1"
+    local a b
+    if [[ "$spec" == *-* ]]; then
+        a="${spec%-*}"; b="${spec#*-}"
+        if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]]; then
+            for ((p=a; p<=b; p++)); do echo "$p"; done
+        fi
+    else
+        [[ "$spec" =~ ^[0-9]+$ ]] && echo "$spec"
+    fi
+}
+
+collect_xray_ports_from_config() {
+    local cfg="$1"
+    local spec
+    while IFS= read -r spec; do
+        [[ -z "$spec" ]] && continue
+        for part in ${spec//,/ }; do
+            expand_port_spec "$part"
+        done
+    done < <(extract_ports_from_json "$cfg" 2>/dev/null)
+}
+
+for XRAY_CFG in "${XRAY_CONFIG_PATHS[@]}"; do
+    if [[ -f "$XRAY_CFG" ]]; then
+        while IFS= read -r p; do
+            [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
+        done < <(collect_xray_ports_from_config "$XRAY_CFG" | sort -nu)
+        [[ ${#XRAY_PORTS[@]} -gt 0 ]] && break
+    fi
+done
+
+# Xray from .env (3x-ui, remnanode, etc.): NODE_PORT (XTLS_API_PORT is internal, skipped)
+for XRAY_ENV in "${XRAY_ENV_PATHS[@]}"; do
+    if [[ -f "$XRAY_ENV" ]] && grep -qE "XTLS_API_PORT|SECRET_KEY" "$XRAY_ENV" 2>/dev/null; then
+        p=$(grep -E "^NODE_PORT=" "$XRAY_ENV" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+        [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
+    fi
+done
+
+# Xray in Docker: get host ports from running containers
+if command -v docker &>/dev/null; then
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && XRAY_PORTS+=("$p")
+    done < <(
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            name="${line%% *}"
+            rest="${line#* }"
+            if [[ "$name" =~ [xX]ray ]] || [[ "$rest" =~ [xX]ray ]] || [[ "$rest" =~ [vV]2ray ]]; then
+                docker port "$name" 2>/dev/null | grep -oE ':[0-9]+$' | tr -d ':'
+            fi
+        done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null)
+        sort -nu
+    )
+fi
+
+# Deduplicate and filter (exclude SSH, 443 already allowed)
+XRAY_PORTS_UNIQ=()
+for p in "${XRAY_PORTS[@]}"; do
+    [[ "$p" == "$SSH_PORT" ]] && continue
+    [[ "$p" == "443" ]] && continue
+    [[ "$p" == "22" ]] && continue
+    seen=false
+    for u in "${XRAY_PORTS_UNIQ[@]}"; do [[ "$u" == "$p" ]] && { seen=true; break; }; done
+    [[ "$seen" == false ]] && XRAY_PORTS_UNIQ+=("$p")
+done
+
 # Detect Remnawave/Remnanode port
 REMNAWAVE_PORT=""
 REMNAWAVE_PATHS=(
@@ -107,6 +201,11 @@ echo ""
 echo -e "${YELLOW}Will configure:${NC}"
 echo "  [x] Allow SSH on port $SSH_PORT"
 echo "  [x] Allow 443/tcp (HTTPS/VPN)"
+if [[ ${#XRAY_PORTS_UNIQ[@]} -gt 0 ]]; then
+    echo "  [x] Allow Xray: ${XRAY_PORTS_UNIQ[*]} (detected)"
+else
+    echo "  [ ] Xray: not detected"
+fi
 if [[ -n "$REMNAWAVE_PORT" ]]; then
     echo "  [x] Allow Remnawave API: $REMNAWAVE_PORT/tcp (detected)"
 else
@@ -148,6 +247,16 @@ fi
 echo -e "${YELLOW}Allowing HTTPS/VPN...${NC}"
 ufw allow 443/tcp comment "HTTPS/VPN" >/dev/null 2>&1
 log "Allowed 443/tcp"
+
+# Allow Xray ports if detected
+if [[ ${#XRAY_PORTS_UNIQ[@]} -gt 0 ]]; then
+    echo -e "${YELLOW}Allowing Xray ports...${NC}"
+    for p in "${XRAY_PORTS_UNIQ[@]}"; do
+        ufw allow "$p/tcp" comment "Xray" >/dev/null 2>&1
+        ufw allow "$p/udp" comment "Xray" >/dev/null 2>&1
+        log "Allowed $p/tcp,udp (Xray)"
+    done
+fi
 
 # Allow Remnawave API if detected
 if [[ -n "$REMNAWAVE_PORT" ]]; then
