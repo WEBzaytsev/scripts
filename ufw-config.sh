@@ -5,7 +5,6 @@
 
 set -e
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,13 +14,11 @@ log()  { echo -e "${GREEN}[OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*"; }
 
-# Check root
 if [[ $EUID -ne 0 ]]; then
     err "Run this script as root"
     exit 1
 fi
 
-# Check dependencies
 check_cmd() {
     command -v "$1" &>/dev/null || { err "Required command not found: $1"; exit 1; }
 }
@@ -31,39 +28,34 @@ check_cmd grep
 check_cmd ss
 check_cmd awk
 
-# Idempotent: add rule only if not already present
-ufw_allow_if_needed() {
-    local rule="$1"
-    local comment="${2:-}"
-    if ufw status 2>/dev/null | grep "ALLOW" | grep -qF "${rule}"; then
+# Add UFW rule only if not already present (idempotent)
+ufw_allow() {
+    local rule="$1" comment="${2:-}"
+    if ufw status 2>/dev/null | grep -q "ALLOW" && ufw status 2>/dev/null | grep "ALLOW" | grep -qF "${rule}"; then
         log "Already allowed: $rule (skipped)"
-    else
-        if [[ -n "$comment" ]]; then
-            ufw allow "$rule" comment "$comment" >/dev/null 2>&1
-        else
-            ufw allow "$rule" >/dev/null 2>&1
-        fi
-        log "Allowed $rule"
+        return
     fi
+    if [[ -n "$comment" ]]; then
+        ufw allow "$rule" comment "$comment" >/dev/null 2>&1
+    else
+        ufw allow "$rule" >/dev/null 2>&1
+    fi
+    log "Allowed $rule"
 }
 
-# Install UFW if not present
 if ! command -v ufw &>/dev/null; then
     warn "UFW not installed. Installing..."
     if command -v apt-get &>/dev/null; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y ufw >/dev/null 2>&1
-        log "UFW installed"
+        apt-get update -y >/dev/null 2>&1 && apt-get install -y ufw >/dev/null 2>&1
     elif command -v dnf &>/dev/null; then
         dnf install -y ufw >/dev/null 2>&1
-        log "UFW installed"
     elif command -v yum &>/dev/null; then
         yum install -y ufw >/dev/null 2>&1
-        log "UFW installed"
     else
         err "Cannot install UFW: unknown package manager"
         exit 1
     fi
+    log "UFW installed"
 fi
 
 echo ""
@@ -72,143 +64,126 @@ echo -e "${YELLOW}      UFW Firewall Configuration       ${NC}"
 echo -e "${YELLOW}========================================${NC}"
 echo ""
 
-# Detect SSH port
+# --- Detect SSH port ---
 SSH_PORT=""
-
-# 1. Check marker file from ssh-config.sh
 if [[ -f /etc/ssh/.custom_port ]]; then
     SSH_PORT=$(cat /etc/ssh/.custom_port 2>/dev/null)
-    echo -e "SSH port (from ssh-config.sh): ${GREEN}$SSH_PORT${NC}"
 fi
-
-# 2. Check sshd_config
 if [[ -z "$SSH_PORT" ]]; then
     SSH_PORT=$(grep -E "^Port[[:space:]]" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | tail -1)
 fi
-
-# 3. Check actual listening port
 if [[ -z "$SSH_PORT" ]]; then
     SSH_PORT=$(ss -tlnp 2>/dev/null | grep -E "sshd|\"ssh\"" | grep -oE ':([0-9]+)' | head -1 | tr -d ':')
 fi
-
-# 4. Default to 22
 SSH_PORT=${SSH_PORT:-22}
-
 echo -e "SSH port detected: ${GREEN}$SSH_PORT${NC}"
 
-# Detect OpenVPN
+# --- Detect OpenVPN ---
 OPENVPN_INSTALLED=false
 if command -v openvpn &>/dev/null || systemctl list-units --type=service 2>/dev/null | grep -q openvpn; then
     OPENVPN_INSTALLED=true
 fi
 
-# Detect Xray ports (host config, .env, or Docker)
-XRAY_PORTS=()
-XRAY_CONFIG_PATHS=(
-    "/etc/xray/config.json"
-    "/usr/local/etc/xray/config.json"
-)
-XRAY_ENV_SEARCH_DIRS=("/opt" "/root" "/etc" "/usr/local")
-
-extract_ports_from_json() {
-    local f="$1"
-    [[ ! -f "$f" ]] && return
-    if command -v jq &>/dev/null; then
-        jq -r '(.inbounds // [])[].port | select(. != null) | if type == "number" then tostring else . end' "$f" 2>/dev/null
-    else
-        { grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+'
-          grep -oE '"port"[[:space:]]*:[[:space:]]*"[^"]+"' "$f" 2>/dev/null | sed -n 's/.*"\([^"]*\)"$/\1/p'; }
-    fi
-}
-
-expand_port_spec() {
-    local spec="$1"
-    local a b
-    if [[ "$spec" == *-* ]]; then
-        a="${spec%-*}"; b="${spec#*-}"
-        if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]]; then
-            for ((p=a; p<=b; p++)); do echo "$p"; done
-        fi
-    else
-        [[ "$spec" =~ ^[0-9]+$ ]] && echo "$spec"
-    fi
-}
-
-collect_xray_ports_from_config() {
-    local cfg="$1"
-    local spec
-    while IFS= read -r spec; do
-        [[ -z "$spec" ]] && continue
-        for part in ${spec//,/ }; do
-            expand_port_spec "$part"
-        done
-    done < <(extract_ports_from_json "$cfg" 2>/dev/null)
-}
-
-for XRAY_CFG in "${XRAY_CONFIG_PATHS[@]}"; do
-    if [[ -f "$XRAY_CFG" ]]; then
-        while IFS= read -r p; do
-            [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
-        done < <(collect_xray_ports_from_config "$XRAY_CFG" | sort -nu)
-        [[ ${#XRAY_PORTS[@]} -gt 0 ]] && break
-    fi
-done
-
-# Xray from .env (ищет в /opt, /root, /etc, /usr/local): NODE_PORT, SELF_STEAL_PORT
-while IFS= read -r xray_env; do
-    [[ -f "$xray_env" ]] || continue
-    grep -qE "^(NODE_PORT|SELF_STEAL_PORT|XTLS_API_PORT|SECRET_KEY)=" "$xray_env" 2>/dev/null || continue
-    for var in NODE_PORT SELF_STEAL_PORT; do
-        p=$(grep -E "^${var}=" "$xray_env" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
-        [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
-    done
-done < <(find "${XRAY_ENV_SEARCH_DIRS[@]}" -name ".env" -type f 2>/dev/null)
-
-# Xray in Docker: get host ports from running containers
-if command -v docker &>/dev/null; then
-    while IFS= read -r p; do
-        [[ -n "$p" ]] && XRAY_PORTS+=("$p")
-    done < <(
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            name="${line%% *}"
-            rest="${line#* }"
-            if [[ "$name" =~ [xX]ray ]] || [[ "$rest" =~ [xX]ray ]] || [[ "$rest" =~ [vV]2ray ]]; then
-                docker port "$name" 2>/dev/null | grep -oE ':[0-9]+$' | tr -d ':'
-            fi
-        done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null)
-        sort -nu
-    )
-fi
-
-# Deduplicate and filter (exclude SSH, 443 already allowed)
-XRAY_PORTS_UNIQ=()
-for p in "${XRAY_PORTS[@]}"; do
-    [[ "$p" == "$SSH_PORT" ]] && continue
-    [[ "$p" == "443" ]] && continue
-    [[ "$p" == "22" ]] && continue
-    seen=false
-    for u in "${XRAY_PORTS_UNIQ[@]}"; do [[ "$u" == "$p" ]] && { seen=true; break; }; done
-    [[ "$seen" == false ]] && XRAY_PORTS_UNIQ+=("$p")
-done
-
-# Detect Remnawave/Remnanode port
+# --- Detect Remnawave/Remnanode port ---
 REMNAWAVE_PORT=""
-REMNAWAVE_PATHS=(
-    "/opt/remnanode/.env"
-    "/opt/remnawave/.env"
-)
+REMNAWAVE_PATHS=("/opt/remnanode/.env" "/opt/remnawave/.env")
 
-for REMNAWAVE_ENV in "${REMNAWAVE_PATHS[@]}"; do
-    if [[ -f "$REMNAWAVE_ENV" ]]; then
-        REMNAWAVE_PORT=$(grep -E "^NODE_PORT=" "$REMNAWAVE_ENV" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
-        if [[ -n "$REMNAWAVE_PORT" ]]; then
-            echo -e "Remnanode port: ${GREEN}$REMNAWAVE_PORT${NC} (from $REMNAWAVE_ENV)"
+for env_file in "${REMNAWAVE_PATHS[@]}"; do
+    if [[ -f "$env_file" ]]; then
+        p=$(grep -E "^NODE_PORT=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+        if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
+            REMNAWAVE_PORT="$p"
+            echo -e "Remnanode port: ${GREEN}$REMNAWAVE_PORT${NC} (from $env_file)"
             break
         fi
     fi
 done
 
+# --- Detect Xray ports ---
+XRAY_PORTS=()
+
+# Helper: parse port values from xray config.json
+_xray_ports_from_json() {
+    local f="$1"
+    [[ -f "$f" ]] || return
+    if command -v jq &>/dev/null; then
+        jq -r '(.inbounds // [])[].port | select(. != null) | if type == "number" then tostring else . end' "$f" 2>/dev/null
+    else
+        grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+'
+        grep -oE '"port"[[:space:]]*:[[:space:]]*"[0-9][^"]*"' "$f" 2>/dev/null | grep -oE '"[0-9][^"]*"' | tr -d '"'
+    fi
+}
+
+# Helper: expand "80", "80-82", "80,81,82" to individual port numbers
+_expand_port_spec() {
+    local spec="$1"
+    local part a b
+    for part in ${spec//,/ }; do
+        if [[ "$part" == *-* ]]; then
+            a="${part%-*}"; b="${part#*-}"
+            [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || continue
+            for ((p=a; p<=b; p++)); do echo "$p"; done
+        else
+            [[ "$part" =~ ^[0-9]+$ ]] && echo "$part"
+        fi
+    done
+}
+
+# 1. From xray config.json
+for cfg in "/etc/xray/config.json" "/usr/local/etc/xray/config.json"; do
+    [[ -f "$cfg" ]] || continue
+    while IFS= read -r spec; do
+        [[ -z "$spec" ]] && continue
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && XRAY_PORTS+=("$p")
+        done < <(_expand_port_spec "$spec")
+    done < <(_xray_ports_from_json "$cfg")
+    [[ ${#XRAY_PORTS[@]} -gt 0 ]] && break
+done
+
+# 2. From .env files (NODE_PORT, SELF_STEAL_PORT) — skip known Remnawave paths
+_is_remnawave_path() {
+    local f="$1"
+    for rp in "${REMNAWAVE_PATHS[@]}"; do
+        [[ "$f" == "$rp" ]] && return 0
+    done
+    return 1
+}
+
+while IFS= read -r env_file; do
+    [[ -f "$env_file" ]] || continue
+    _is_remnawave_path "$env_file" && continue
+    grep -qE "^XTLS_API_PORT=" "$env_file" 2>/dev/null || continue
+    for var in NODE_PORT SELF_STEAL_PORT; do
+        p=$(grep -E "^${var}=" "$env_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+        [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && XRAY_PORTS+=("$p")
+    done
+done < <(find /opt /root /etc /usr/local -maxdepth 3 -name ".env" -type f 2>/dev/null)
+
+# 3. From Docker containers named/imaged as xray/v2ray
+if command -v docker &>/dev/null; then
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        name="${line%% *}"; rest="${line#* }"
+        if [[ "$name" =~ [xX]ray ]] || [[ "$rest" =~ [xX]ray ]] || [[ "$rest" =~ [vV]2ray ]]; then
+            while IFS= read -r p; do
+                [[ -n "$p" ]] && XRAY_PORTS+=("$p")
+            done < <(docker port "$name" 2>/dev/null | grep -oE ':[0-9]+$' | tr -d ':')
+        fi
+    done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null)
+fi
+
+# Deduplicate, exclude already-handled ports (SSH, 443, Remnawave)
+XRAY_PORTS_UNIQ=()
+for p in "${XRAY_PORTS[@]}"; do
+    [[ "$p" == "22" || "$p" == "$SSH_PORT" || "$p" == "443" ]] && continue
+    [[ -n "$REMNAWAVE_PORT" && "$p" == "$REMNAWAVE_PORT" ]] && continue
+    skip=false
+    for u in "${XRAY_PORTS_UNIQ[@]}"; do [[ "$u" == "$p" ]] && { skip=true; break; }; done
+    [[ "$skip" == false ]] && XRAY_PORTS_UNIQ+=("$p")
+done
+
+# --- Summary ---
 echo ""
 echo -e "${YELLOW}Will configure:${NC}"
 echo "  [x] Allow SSH on port $SSH_PORT"
@@ -236,57 +211,45 @@ if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
     echo "Cancelled"
     exit 0
 fi
-
 echo ""
 
-# Set default policies (if not already set)
+# --- Apply ---
 echo -e "${YELLOW}Setting default policies...${NC}"
 ufw default deny incoming >/dev/null 2>&1
 ufw default allow outgoing >/dev/null 2>&1
-log "Default policies set (deny incoming, allow outgoing)"
+log "Default policies set"
 
-# Allow SSH first! Critical!
 echo -e "${YELLOW}Allowing SSH...${NC}"
 if [[ "$SSH_PORT" == "22" ]]; then
-    if ufw status 2>/dev/null | grep "ALLOW" | grep -qE "22/tcp|OpenSSH"; then
-        log "Already allowed: OpenSSH (skipped)"
-    else
-        ufw allow OpenSSH >/dev/null 2>&1
-        log "Allowed OpenSSH (port 22)"
-    fi
+    ufw_allow "OpenSSH"
 else
-    ufw_allow_if_needed "$SSH_PORT/tcp" "SSH"
+    ufw_allow "$SSH_PORT/tcp" "SSH"
 fi
 
-# Allow HTTPS/VPN port
 echo -e "${YELLOW}Allowing HTTPS/VPN...${NC}"
-ufw_allow_if_needed "443/tcp" "HTTPS/VPN"
+ufw_allow "443/tcp" "HTTPS/VPN"
 
-# Allow Xray ports if detected
 if [[ ${#XRAY_PORTS_UNIQ[@]} -gt 0 ]]; then
     echo -e "${YELLOW}Allowing Xray ports...${NC}"
     for p in "${XRAY_PORTS_UNIQ[@]}"; do
-        ufw_allow_if_needed "$p/tcp" "Xray"
-        ufw_allow_if_needed "$p/udp" "Xray"
+        ufw_allow "$p/tcp" "Xray"
+        ufw_allow "$p/udp" "Xray"
     done
 fi
 
-# Allow Remnawave API if detected
 if [[ -n "$REMNAWAVE_PORT" ]]; then
     echo -e "${YELLOW}Allowing Remnawave API...${NC}"
-    ufw_allow_if_needed "$REMNAWAVE_PORT/tcp" "Remnawave API"
+    ufw_allow "$REMNAWAVE_PORT/tcp" "Remnawave API"
 fi
 
-# Allow OpenVPN if installed
 if $OPENVPN_INSTALLED; then
     echo -e "${YELLOW}Allowing OpenVPN...${NC}"
-    ufw_allow_if_needed "1194/udp" "OpenVPN"
+    ufw_allow "1194/udp" "OpenVPN"
 fi
 
-# Block ICMP (ping)
+# --- Block ICMP ---
 echo ""
 echo -e "${YELLOW}Configuring ICMP blocking...${NC}"
-
 BEFORE_RULES="/etc/ufw/before.rules"
 
 if [[ ! -f "$BEFORE_RULES" ]]; then
@@ -294,54 +257,40 @@ if [[ ! -f "$BEFORE_RULES" ]]; then
     exit 1
 fi
 
-# Check if ICMP rules need changing
 ICMP_NEEDS_CHANGE=false
-if grep -q "icmp.*-j ACCEPT" "$BEFORE_RULES"; then
-    ICMP_NEEDS_CHANGE=true
-fi
-if ! grep -q "icmp-type source-quench" "$BEFORE_RULES"; then
-    ICMP_NEEDS_CHANGE=true
-fi
+grep -q "icmp.*-j ACCEPT" "$BEFORE_RULES" && ICMP_NEEDS_CHANGE=true
+grep -q "icmp-type source-quench" "$BEFORE_RULES" || ICMP_NEEDS_CHANGE=true
 
 if [[ "$ICMP_NEEDS_CHANGE" == true ]]; then
-    # Backup only if we need to change
     BACKUP_FILE="${BEFORE_RULES}.backup.$(date +%Y%m%d%H%M%S)"
     cp "$BEFORE_RULES" "$BACKUP_FILE"
     log "Backup: $BACKUP_FILE"
 
-    # Replace ACCEPT with DROP for ICMP rules
-    sed -i 's/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-input -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
+    local_icmp_types=(destination-unreachable time-exceeded parameter-problem echo-request)
+    for icmp_type in "${local_icmp_types[@]}"; do
+        sed -i "s/-A ufw-before-input -p icmp --icmp-type ${icmp_type} -j ACCEPT/-A ufw-before-input -p icmp --icmp-type ${icmp_type} -j DROP/g" "$BEFORE_RULES"
+        sed -i "s/-A ufw-before-forward -p icmp --icmp-type ${icmp_type} -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type ${icmp_type} -j DROP/g" "$BEFORE_RULES"
+    done
 
-    sed -i 's/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type time-exceeded -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type parameter-problem -j DROP/g' "$BEFORE_RULES"
-    sed -i 's/-A ufw-before-forward -p icmp --icmp-type echo-request -j ACCEPT/-A ufw-before-forward -p icmp --icmp-type echo-request -j DROP/g' "$BEFORE_RULES"
-
-    # Add source-quench DROP if not exists
     if ! grep -q "icmp-type source-quench" "$BEFORE_RULES"; then
         sed -i '/-A ufw-before-input -p icmp --icmp-type echo-request/a -A ufw-before-input -p icmp --icmp-type source-quench -j DROP' "$BEFORE_RULES"
     fi
 
-    log "ICMP rules changed to DROP"
+    log "ICMP rules set to DROP"
 else
     log "ICMP already configured (skipped)"
 fi
 
-# Enable UFW
+# --- Enable ---
 echo ""
 echo -e "${YELLOW}Enabling UFW...${NC}"
 ufw --force enable >/dev/null 2>&1
 log "UFW enabled"
 
-# Show status
 echo ""
 echo -e "${YELLOW}Current UFW status:${NC}"
 ufw status verbose
 
-# Validate SSH is still accessible
 echo ""
 echo -e "${YELLOW}Validating SSH access...${NC}"
 if ufw status | grep -qE "$SSH_PORT/tcp|OpenSSH"; then
