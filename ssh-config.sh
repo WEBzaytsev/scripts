@@ -46,6 +46,23 @@ test_sshd() {
   "$sbin" -t >/dev/null 2>&1
 }
 
+# ---------- /run/sshd ----------
+
+# sshd needs /run/sshd for privilege separation. It lives on tmpfs and
+# vanishes on reboot. We create it now and register it in tmpfiles.d so
+# systemd recreates it on every boot automatically.
+ensure_run_sshd() {
+  mkdir -p /run/sshd
+  chmod 0755 /run/sshd
+
+  if [[ -d /etc/tmpfiles.d ]]; then
+    echo "d /run/sshd 0755 root root -" >/etc/tmpfiles.d/sshd.conf
+    ok "Registered /run/sshd in /etc/tmpfiles.d/sshd.conf (survives reboots)"
+  else
+    warn "/etc/tmpfiles.d not found; /run/sshd will be missing after next reboot"
+  fi
+}
+
 # ---------- backups / atomic write ----------
 
 mk_backup() {
@@ -337,12 +354,60 @@ print_unit_debug() {
   local unit="$1"
   warn "---- systemctl status ${unit} ----"
   systemctl status "$unit" --no-pager -l >&2 || true
-  warn "---- journalctl -u ${unit} (last 80 lines) ----"
-  journalctl -u "$unit" -b --no-pager -n 80 >&2 || true
+  warn "---- journalctl -u ${unit} (last 30 lines) ----"
+  journalctl -u "$unit" -b --no-pager -n 30 >&2 || true
+}
+
+# Kill any sshd listener that systemd does NOT manage.
+#
+# Why: on Ubuntu with socket activation, if a "stale" sshd is already
+# holding the port (e.g. manually started, survived a failed reload),
+# systemd cannot bind its socket and reports
+# "A dependency job for ssh.service failed".
+# We only kill the master listener process (the one with an open
+# LISTEN socket). Per-session child sshd processes are left alone so
+# that existing SSH sessions are not dropped.
+kill_unmanaged_sshd_listener() {
+  local svc="${1:-}" sock="${2:-}"
+
+  # PID that systemd considers the current service main process (0 if none)
+  local systemd_pid="0"
+  if [[ -n "$svc" ]] && has_systemd; then
+    systemd_pid="$(systemctl show "$svc" -p MainPID --value 2>/dev/null || echo 0)"
+  fi
+
+  # Find listener PIDs via ss (processes with a LISTEN socket labelled sshd)
+  local listener_pids
+  listener_pids="$(ss -tlnp 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' \
+    | cut -d= -f2 \
+    | sort -u || true)"
+
+  local killed=0
+  local pid
+  for pid in $listener_pids; do
+    [[ -z "$pid" || "$pid" == "0" ]] && continue
+    # Skip if this is already the systemd-managed process
+    [[ "$pid" == "$systemd_pid" ]] && continue
+    # Only kill actual sshd processes
+    local comm
+    comm="$(cat /proc/"$pid"/comm 2>/dev/null || true)"
+    [[ "$comm" == sshd ]] || continue
+    info "Stopping unmanaged sshd listener (pid=$pid)"
+    kill "$pid" 2>/dev/null || true
+    ((killed++))
+  done
+
+  [[ "$killed" -gt 0 ]] && sleep 1
+  return 0
 }
 
 restart_ssh_once() {
   local mode="$1"
+
+  # Always ensure /run/sshd exists before attempting any restart.
+  # This is the most common reason sshd fails on tmpfs-based /run.
+  ensure_run_sshd
 
   if has_systemd; then
     systemctl daemon-reload || true
@@ -353,8 +418,19 @@ restart_ssh_once() {
 
     if [[ "$mode" == "service" && -n "$svc" ]]; then
       info "Restarting SSH via service unit: $svc"
+
+      kill_unmanaged_sshd_listener "$svc" "$sock"
+
       systemctl unmask "$svc" >/dev/null 2>&1 || true
       systemctl enable "$svc" >/dev/null 2>&1 || true
+
+      # If a socket unit exists, stop it first so it doesn't conflict
+      # when the service tries to bind the port directly.
+      if [[ -n "$sock" ]]; then
+        systemctl stop "$sock" 2>/dev/null || true
+        systemctl unmask "$sock" >/dev/null 2>&1 || true
+      fi
+
       systemctl restart "$svc" || { print_unit_debug "$svc"; return 1; }
       ok "SSH restarted via $svc"
       return 0
@@ -362,6 +438,9 @@ restart_ssh_once() {
 
     if [[ "$mode" == "socket" && -n "$sock" ]]; then
       info "Restarting SSH via socket activation: $sock"
+
+      kill_unmanaged_sshd_listener "$svc" "$sock"
+
       systemctl unmask "$sock" >/dev/null 2>&1 || true
       systemctl enable --now "$sock" >/dev/null 2>&1 || true
       systemctl restart "$sock" || { print_unit_debug "$sock"; return 1; }
@@ -404,6 +483,8 @@ main() {
   need sed; need awk; need grep; need date; need mktemp
   [[ -f "$SSHD_MAIN" ]] || die "SSH config not found: $SSHD_MAIN"
   sshd_bin >/dev/null
+
+  ensure_run_sshd
 
   local key_mode="false" key_arg=""
   local assume_yes="false"
