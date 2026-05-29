@@ -177,7 +177,14 @@ uninstall() {
 
 post_check() {
   info "Post-check: bash -ic 'type dcpu'"
-  if bash -ic 'type dcpu' >/dev/null 2>&1; then
+  # NOTE: when run via `curl | sudo bash`, stdin is the curl pipe.
+  # An interactive `bash -i` inherits that pipe and hangs reading from it,
+  # so we must detach stdin (</dev/null) and guard with a timeout.
+  local check_cmd=(bash -ic 'type dcpu')
+  if command -v timeout >/dev/null 2>&1; then
+    check_cmd=(timeout 10 "${check_cmd[@]}")
+  fi
+  if "${check_cmd[@]}" </dev/null >/dev/null 2>&1; then
     ok "Verified: aliases load in interactive non-login bash"
   else
     warn "Aliases did NOT load in 'bash -ic'."
