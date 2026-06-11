@@ -55,6 +55,15 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 
 Удаляет все authorized_keys у root и всех пользователей (с бэкапами `*.bak.<timestamp>`), проверяет sshd_config на нестандартные пути `AuthorizedKeysFile`.
 
+### Оставить только новый ключ (рекомендуется)
+
+Сначала добавляет указанный ключ, затем удаляет все остальные — доступ не теряется:
+
+```bash
+KEY="ssh-ed25519 AAAA..."
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --yes --kill-sessions
+```
+
 ### Интерактивно
 
 ```bash
@@ -73,7 +82,7 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh
 curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash -s -- --yes --kill-sessions --regen-host-keys
 ```
 
-**ВАЖНО:** не закрывайте текущую сессию! Сразу после очистки добавьте новый ключ:
+**ВАЖНО:** если запускали без `-k` — не закрывайте текущую сессию, сразу добавьте новый ключ:
 
 ```bash
 KEY="ssh-ed25519 AAAA..."

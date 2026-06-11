@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # clear-ssh-keys.sh — emergency revocation of ALL authorized SSH keys (post-compromise)
 # - removes authorized_keys / authorized_keys2 for root and all real users (with backups)
+# - with -k "KEY": installs the given key FIRST, then removes everything except it
 # - detects and clears non-standard AuthorizedKeysFile paths (possible backdoors)
 # - optionally kills all other active SSH sessions (attacker may still be inside)
 # - optionally regenerates SSH host keys
 #
 # Examples:
+#   curl -fsSL URL | sudo bash -s -- -k "ssh-ed25519 AAAA..." --yes --kill-sessions
 #   curl -fsSL URL | sudo bash -s -- --yes
-#   curl -fsSL URL | sudo bash -s -- --yes --kill-sessions
 #   sudo ./clear-ssh-keys.sh --yes --kill-sessions --regen-host-keys
 #
-# AFTER RUNNING: keep this session open and add your new key immediately:
+# Without -k: keep this session open and add your new key immediately after:
 #   KEY="ssh-ed25519 AAAA..."
 #   curl -fsSL .../ssh-config.sh | sudo bash -s -- -k "$KEY"
 
@@ -56,6 +57,50 @@ prompt_yn() {
       *) warn "Invalid input: '$ans'. Enter y or n." ;;
     esac
   done
+}
+
+# ---------- new key handling ----------
+
+current_user() { [[ -n "${SUDO_USER:-}" ]] && echo "$SUDO_USER" || echo "$USER"; }
+current_home() { [[ -n "${SUDO_USER:-}" ]] && eval echo "~$SUDO_USER" || echo "$HOME"; }
+
+read_key() {
+  local key=""
+  if [[ -n "${1:-}" ]]; then
+    key="$1"
+  else
+    key="$(cat || true)"
+  fi
+
+  key="$(echo "$key" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  key="$(echo "$key" | grep -v '^[[:space:]]*$' | head -1 || true)"
+  [[ -n "$key" ]] || die "No SSH public key provided"
+  echo "$key"
+}
+
+valid_key() {
+  local k="$1"
+  [[ "$k" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-dss)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]] && return 0
+  if command -v ssh-keygen >/dev/null 2>&1; then
+    echo "$k" | ssh-keygen -l -f - >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# Install the new key as the ONLY content of the target user's authorized_keys
+install_new_key() {
+  local key="$1" user="$2" home="$3"
+  local dir="${home}/.ssh" ak="${home}/.ssh/authorized_keys"
+
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  chown "$user:$user" "$dir" 2>/dev/null || true
+
+  mk_backup "$ak"
+  echo "$key" >"$ak"
+  chmod 600 "$ak"
+  chown "$user:$user" "$ak" 2>/dev/null || true
+  ok "Installed new key as the only key in $ak"
 }
 
 # ---------- users enumeration ----------
@@ -233,20 +278,22 @@ regen_host_keys() {
 usage() {
   cat <<EOF
 Usage:
+  sudo $0 -k "ssh-ed25519 AAAA..." [--yes] [--kill-sessions]
   sudo $0 [--yes] [--kill-sessions] [--regen-host-keys]
 
 Removes ALL authorized SSH keys for root and every real user (uid >= 1000).
 Backups are kept next to each file as authorized_keys.bak.<timestamp>.
 
+With -k, the given key is installed FIRST and survives the cleanup:
+the end result is exactly one authorized key on the whole server.
+
 Options:
+  -k, --key [KEY]     Install this public key first, keep ONLY it
+                      (if KEY omitted, read from stdin)
   -y, --yes           Skip confirmations
   --kill-sessions     Kill all other active SSH sessions (keeps the current one)
   --regen-host-keys   Regenerate /etc/ssh/ssh_host_* keys and restart sshd
   -h, --help          Show help
-
-AFTER RUNNING: do NOT close this session. Add your new key immediately, e.g.:
-  KEY="ssh-ed25519 AAAA..."
-  curl -fsSL .../ssh-config.sh | sudo bash -s -- -k "\$KEY"
 EOF
 }
 
@@ -257,9 +304,15 @@ main() {
   command -v awk >/dev/null 2>&1 || die "Command not found: awk"
 
   local assume_yes="false" do_kill="ask" do_regen="false"
+  local key_mode="false" key_arg=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -k|--key)
+        key_mode="true"
+        shift || true
+        if [[ $# -gt 0 && "${1:-}" != -* ]]; then key_arg="$1"; shift || true; fi
+        ;;
       -y|--yes) assume_yes="true"; shift ;;
       --kill-sessions) do_kill="true"; shift ;;
       --regen-host-keys) do_regen="true"; shift ;;
@@ -268,13 +321,35 @@ main() {
     esac
   done
 
+  # --- validate new key up front (before any destructive action) ---
+  local new_key="" keep_user="" keep_home="" keep_file=""
+  if [[ "$key_mode" == "true" ]]; then
+    keep_user="$(current_user)"
+    keep_home="$(current_home)"
+    [[ -d "$keep_home" ]] || die "Cannot determine home directory for user: $keep_user"
+    new_key="$(read_key "${key_arg:-}")"
+    valid_key "$new_key" || die "Invalid SSH public key format"
+    keep_file="${keep_home}/.ssh/authorized_keys"
+    info "New key will be installed for user '$keep_user' and kept after cleanup"
+  fi
+
   # --- confirm ---
   if [[ "$assume_yes" != "true" ]]; then
     has_tty || die "No TTY for confirmation. Use --yes."
     echo
-    warn "This will REMOVE ALL authorized SSH keys for root and every real user."
-    warn "You will only keep access through the CURRENT session until a new key is added."
+    if [[ "$key_mode" == "true" ]]; then
+      warn "This will REMOVE ALL authorized SSH keys for root and every real user,"
+      warn "keeping ONLY the new key for user '$keep_user'."
+    else
+      warn "This will REMOVE ALL authorized SSH keys for root and every real user."
+      warn "You will only keep access through the CURRENT session until a new key is added."
+    fi
     prompt_yn "Continue?" "n" || { echo "Cancelled"; exit 0; }
+  fi
+
+  # --- install new key FIRST (no window without access) ---
+  if [[ "$key_mode" == "true" ]]; then
+    install_new_key "$new_key" "$keep_user" "$keep_home"
   fi
 
   # --- collect AuthorizedKeysFile paths (backdoor check) ---
@@ -306,6 +381,11 @@ main() {
       # dedupe (defaults may repeat the configured paths)
       [[ "$seen_paths" == *" $f "* ]] && continue
       seen_paths+="$f "
+      # never touch the file that now holds the new key
+      if [[ -n "$keep_file" && "$f" == "$keep_file" ]]; then
+        info "Keeping: $f (contains the new key)"
+        continue
+      fi
       [[ -f "$f" ]] || continue
       n="$(count_keys "$f")"
       mk_backup "$f"
@@ -349,11 +429,16 @@ main() {
   # --- final message ---
   echo
   ok "SSH keys cleared. Backups: *.bak.${TS}"
-  warn "IMPORTANT: do NOT close this session. Add your new key NOW:"
-  echo '  KEY="ssh-ed25519 AAAA..."'
-  echo '  curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY"'
-  echo
-  warn "Then test login with the new key in a NEW terminal before closing this one."
+  if [[ "$key_mode" == "true" ]]; then
+    ok "The ONLY authorized key now belongs to user '$keep_user' ($keep_file)"
+    warn "Test login with this key in a NEW terminal before closing this session."
+  else
+    warn "IMPORTANT: do NOT close this session. Add your new key NOW:"
+    echo '  KEY="ssh-ed25519 AAAA..."'
+    echo '  curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY"'
+    echo
+    warn "Then test login with the new key in a NEW terminal before closing this one."
+  fi
 }
 
 main "$@"
