@@ -186,7 +186,7 @@ listener_sshd_pids() {
   echo "$pids"
 }
 
-# PIDs in our own ancestry chain (current session must survive)
+# PIDs in our own ancestry chain (fallback)
 my_ancestor_pids() {
   local pid=$$ chain=""
   while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]]; do
@@ -196,8 +196,34 @@ my_ancestor_pids() {
   echo "$chain"
 }
 
+# sshd PID serving THIS connection via SSH_CONNECTION env var (most reliable)
+my_ssh_server_pid() {
+  [[ -z "${SSH_CONNECTION:-}" ]] && return
+  command -v ss >/dev/null 2>&1 || return
+  local src_ip src_port
+  src_ip="$(echo "$SSH_CONNECTION"  | awk '{print $1}')"
+  src_port="$(echo "$SSH_CONNECTION" | awk '{print $2}')"
+  [[ -z "$src_ip" || -z "$src_port" ]] && return
+  # ss -tnp shows: ESTAB ... src_ip:src_port ... users:(("sshd",pid=NNN,...))
+  ss -tnp 2>/dev/null \
+    | grep "${src_ip}:${src_port}" \
+    | grep -oE 'pid=[0-9]+' \
+    | head -1 \
+    | cut -d= -f2 || true
+}
+
 kill_other_ssh_sessions() {
+  local my_server_pid
+  my_server_pid="$(my_ssh_server_pid)"
   local keep=" $(listener_sshd_pids) $(my_ancestor_pids) "
+  [[ -n "$my_server_pid" ]] && keep+=" $my_server_pid "
+
+  if [[ -n "$my_server_pid" ]]; then
+    info "Current SSH session sshd pid=$my_server_pid (protected)"
+  else
+    warn "Could not identify current session sshd via SSH_CONNECTION; using ancestor chain only"
+  fi
+
   local killed=0 pid comm
   for pid in $(pgrep -x sshd 2>/dev/null || true); do
     [[ "$keep" == *" $pid "* ]] && continue
@@ -209,7 +235,6 @@ kill_other_ssh_sessions() {
   done
   if (( killed > 0 )); then
     sleep 1
-    # force-kill stragglers
     for pid in $(pgrep -x sshd 2>/dev/null || true); do
       [[ "$keep" == *" $pid "* ]] && continue
       kill -9 "$pid" 2>/dev/null || true
