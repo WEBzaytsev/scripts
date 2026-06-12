@@ -51,9 +51,11 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 
 ---
 
-## Clear SSH Keys
+## Revoke SSH Keys
 
 Удаляет все authorized_keys у root и всех пользователей (с бэкапами `*.bak.<timestamp>`), проверяет sshd_config на нестандартные пути `AuthorizedKeysFile`.
+
+> Используется `raw.githubusercontent.com`, т.к. jsDelivr кэширует `@main` и может отдать старую версию.
 
 ### Оставить только новый ключ (рекомендуется)
 
@@ -61,25 +63,25 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 
 ```bash
 KEY="ssh-ed25519 AAAA..."
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --yes --kill-sessions
+curl -sSL "https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh" | sudo bash -s -- -k "$KEY" --yes --kill-sessions
 ```
 
 ### Интерактивно
 
 ```bash
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash
+curl -sSL "https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh" | sudo bash
 ```
 
 ### Неинтерактивно + завершить чужие SSH-сессии
 
 ```bash
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash -s -- --yes --kill-sessions
+curl -sSL "https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh" | sudo bash -s -- --yes --kill-sessions
 ```
 
 ### Ключи + сессии + перегенерация host-ключей
 
 ```bash
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=$(date +%s)" | sudo bash -s -- --yes --kill-sessions --regen-host-keys
+curl -sSL "https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh" | sudo bash -s -- --yes --kill-sessions --regen-host-keys
 ```
 
 **ВАЖНО:** если запускали без `-k` — не закрывайте текущую сессию, сразу добавьте новый ключ:

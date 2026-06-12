@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clear-ssh-keys.sh — emergency revocation of ALL authorized SSH keys (post-compromise)
+# revoke-ssh-keys.sh — emergency revocation of ALL authorized SSH keys (post-compromise)
 # - removes authorized_keys / authorized_keys2 for root and all real users (with backups)
 # - with -k "KEY": installs the given key FIRST, then removes everything except it
 # - detects and clears non-standard AuthorizedKeysFile paths (possible backdoors)
@@ -9,7 +9,7 @@
 # Examples:
 #   curl -fsSL URL | sudo bash -s -- -k "ssh-ed25519 AAAA..." --yes --kill-sessions
 #   curl -fsSL URL | sudo bash -s -- --yes
-#   sudo ./clear-ssh-keys.sh --yes --kill-sessions --regen-host-keys
+#   sudo ./revoke-ssh-keys.sh --yes --kill-sessions --regen-host-keys
 #
 # Without -k: keep this session open and add your new key immediately after:
 #   KEY="ssh-ed25519 AAAA..."

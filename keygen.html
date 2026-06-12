@@ -161,9 +161,9 @@
       const v = Date.now();
       // raw.githubusercontent serves the fresh version immediately.
       // jsDelivr caches @main and ignores ?v=, so it can return a stale script.
-      const url = `https://raw.githubusercontent.com/WEBzaytsev/scripts/main/clear-ssh-keys.sh?v=${v}`;
+      const url = `https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh?v=${v}`;
       const run = `curl -sSL "${url}" | sudo bash -s -- -k "${key}" --yes --kill-sessions`;
-      const cleanup = `rm -f -- ./clear-ssh-keys.sh ~/clear-ssh-keys.sh /tmp/clear-ssh-keys.sh /root/clear-ssh-keys.sh 2>/dev/null`;
+      const cleanup = `rm -f -- ./revoke-ssh-keys.sh ~/revoke-ssh-keys.sh /tmp/revoke-ssh-keys.sh /root/revoke-ssh-keys.sh 2>/dev/null`;
       return `${cleanup}; ${run}; ${cleanup}`;
     }
 
