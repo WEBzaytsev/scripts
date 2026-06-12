@@ -138,12 +138,12 @@ wget -qO ufw-config.sh "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-
 ## Генерация SSH ключа
 
 ```bash
-ssh-keygen -t ed25519 -C "your_email@example.com"
+ssh-keygen -t ed25519 -C "your_email@example.com" -f ./id_ed25519
 ```
 
 Показать публичный ключ:
 
 ```bash
-cat ~/.ssh/id_ed25519.pub
+cat ./id_ed25519.pub
 ```
 
