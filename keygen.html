@@ -160,7 +160,9 @@
     function buildCommand(key) {
       const v = Date.now();
       const url = `https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=${v}`;
-      return `curl -sSL "${url}" | sudo bash -s -- -k "${key}" --yes --kill-sessions`;
+      const run = `curl -sSL "${url}" | sudo bash -s -- -k "${key}" --yes --kill-sessions`;
+      const cleanup = `rm -f -- ./clear-ssh-keys.sh ~/clear-ssh-keys.sh /tmp/clear-ssh-keys.sh /root/clear-ssh-keys.sh 2>/dev/null`;
+      return `${run}; ${cleanup}`;
     }
 
     input.addEventListener('input', () => {
