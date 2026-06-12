@@ -170,7 +170,33 @@ expand_keys_path() {
 
 # ---------- kill other ssh sessions ----------
 
-# PIDs of sshd listener processes (must not be killed)
+# Robustly read PPID from /proc/PID/stat.
+# comm (field 2) may contain spaces and ')', e.g. "(sshd: root@pts/0)",
+# so we strip everything up to the LAST ')' and read fields after it:
+# <state> <ppid> ...  -> ppid is the 2nd token.
+get_ppid() {
+  local stat rest
+  stat="$(cat /proc/"$1"/stat 2>/dev/null)" || return 0
+  rest="${stat##*) }"
+  # shellcheck disable=SC2086
+  set -- $rest
+  echo "${2:-}"
+}
+
+# All PIDs in our ancestry chain (current process up to pid 1).
+# Protecting every ancestor guarantees we never kill the sshd/sshd-session
+# that serves the CURRENT shell, regardless of how deep sudo/bash nest.
+my_ancestor_pids() {
+  local pid=$$ chain="" guard=0
+  while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]]; do
+    chain+=" $pid"
+    pid="$(get_ppid "$pid")"
+    (( ++guard > 64 )) && break
+  done
+  echo "$chain"
+}
+
+# PIDs of sshd LISTENER processes (must not be killed)
 listener_sshd_pids() {
   local pids=""
   if command -v ss >/dev/null 2>&1; then
@@ -186,56 +212,87 @@ listener_sshd_pids() {
   echo "$pids"
 }
 
-# PIDs in our own ancestry chain (fallback)
-my_ancestor_pids() {
-  local pid=$$ chain=""
+# SSH_CONNECTION for the current shell. sudo strips it from our own env,
+# so we recover it from an ancestor process environ when needed.
+get_ssh_connection() {
+  [[ -n "${SSH_CONNECTION:-}" ]] && { echo "$SSH_CONNECTION"; return 0; }
+  local pid=$$ guard=0 v
   while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]]; do
-    chain+=" $pid"
-    pid="$(awk '{print $4}' /proc/"$pid"/stat 2>/dev/null || echo "")"
+    if [[ -r /proc/$pid/environ ]]; then
+      v="$(tr '\0' '\n' < /proc/"$pid"/environ 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p' | head -1)"
+      [[ -n "$v" ]] && { echo "$v"; return 0; }
+    fi
+    pid="$(get_ppid "$pid")"
+    (( ++guard > 64 )) && break
   done
-  echo "$chain"
+  return 0
 }
 
-# sshd PID serving THIS connection via SSH_CONNECTION env var (most reliable)
+# sshd PID serving THIS connection, matched by client ip:port via ss.
 my_ssh_server_pid() {
-  [[ -z "${SSH_CONNECTION:-}" ]] && return
-  command -v ss >/dev/null 2>&1 || return
-  local src_ip src_port
-  src_ip="$(echo "$SSH_CONNECTION"  | awk '{print $1}')"
-  src_port="$(echo "$SSH_CONNECTION" | awk '{print $2}')"
-  [[ -z "$src_ip" || -z "$src_port" ]] && return
-  # ss -tnp shows: ESTAB ... src_ip:src_port ... users:(("sshd",pid=NNN,...))
+  command -v ss >/dev/null 2>&1 || return 0
+  local conn src_ip src_port
+  conn="$(get_ssh_connection)"
+  [[ -z "$conn" ]] && return 0
+  src_ip="$(echo "$conn" | awk '{print $1}')"
+  src_port="$(echo "$conn" | awk '{print $2}')"
+  [[ -z "$src_ip" || -z "$src_port" ]] && return 0
   ss -tnp 2>/dev/null \
-    | grep "${src_ip}:${src_port}" \
+    | grep -F "${src_ip}:${src_port}" \
     | grep -oE 'pid=[0-9]+' \
-    | head -1 \
-    | cut -d= -f2 || true
+    | cut -d= -f2 | sort -u | tr '\n' ' '
+}
+
+# Are we running inside an SSH session at all?
+in_ssh_session() {
+  [[ -n "$(get_ssh_connection)" ]] && return 0
+  local pid=$$ guard=0 stat
+  while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]]; do
+    stat="$(cat /proc/"$pid"/stat 2>/dev/null || true)"
+    [[ "$stat" == *"(sshd"* ]] && return 0
+    pid="$(get_ppid "$pid")"
+    (( ++guard > 64 )) && break
+  done
+  return 1
 }
 
 kill_other_ssh_sessions() {
-  local my_server_pid
-  my_server_pid="$(my_ssh_server_pid)"
-  local keep=" $(listener_sshd_pids) $(my_ancestor_pids) "
-  [[ -n "$my_server_pid" ]] && keep+=" $my_server_pid "
+  local my_server_pids
+  my_server_pids="$(my_ssh_server_pid)"
 
-  if [[ -n "$my_server_pid" ]]; then
-    info "Current SSH session sshd pid=$my_server_pid (protected)"
-  else
-    warn "Could not identify current session sshd via SSH_CONNECTION; using ancestor chain only"
+  # FAIL-SAFE: if we are inside an SSH session but cannot positively
+  # identify which sshd serves it, do NOT kill anything. Killing blindly
+  # is how a remote admin locks themselves out.
+  if in_ssh_session && [[ -z "${my_server_pids// /}" ]]; then
+    warn "Could not positively identify the sshd of the CURRENT session."
+    warn "Refusing to kill any SSH sessions to avoid locking you out."
+    warn "Kill foreign sessions manually after verifying your own pid:"
+    warn "  ss -tnp | grep ssh    # find your client ip:port and its pid"
+    warn "  kill <other_session_pids>"
+    return 0
   fi
 
+  local keep=" $(listener_sshd_pids) $(my_ancestor_pids) ${my_server_pids} "
+  if [[ -n "${my_server_pids// /}" ]]; then
+    info "Current session sshd pid(s):${my_server_pids} (protected)"
+  fi
+
+  # Match both classic 'sshd' (per-connection) and 'sshd-session' (OpenSSH 9.8+)
+  local candidates
+  candidates="$( { pgrep -x sshd 2>/dev/null; pgrep -x sshd-session 2>/dev/null; } | sort -u || true)"
+
   local killed=0 pid comm
-  for pid in $(pgrep -x sshd 2>/dev/null || true); do
+  for pid in $candidates; do
     [[ "$keep" == *" $pid "* ]] && continue
     comm="$(cat /proc/"$pid"/comm 2>/dev/null || true)"
-    [[ "$comm" == "sshd" ]] || continue
-    info "Killing SSH session process (pid=$pid)"
+    [[ "$comm" == "sshd" || "$comm" == "sshd-session" ]] || continue
+    info "Killing SSH session process (pid=$pid, $comm)"
     kill "$pid" 2>/dev/null || true
     ((killed++)) || true
   done
   if (( killed > 0 )); then
     sleep 1
-    for pid in $(pgrep -x sshd 2>/dev/null || true); do
+    for pid in $candidates; do
       [[ "$keep" == *" $pid "* ]] && continue
       kill -9 "$pid" 2>/dev/null || true
     done

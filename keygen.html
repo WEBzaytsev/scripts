@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clear SSH Keys</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #1a1d2e;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #64748b;
+      margin-bottom: 28px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 90px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      padding: 12px;
+      resize: none;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    textarea:focus { border-color: #4f6ef7; }
+    textarea::placeholder { color: #3d4460; }
+
+    .result-block {
+      margin-top: 24px;
+      display: none;
+    }
+
+    .result-block.visible { display: block; }
+
+    .result-label {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+
+    .command-wrap {
+      position: relative;
+    }
+
+    .command {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 14px 48px 14px 14px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      color: #a5f3a5;
+      word-break: break-all;
+      line-height: 1.6;
+      min-height: 56px;
+      white-space: pre-wrap;
+      user-select: all;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: #2d3148;
+      border: none;
+      border-radius: 6px;
+      color: #94a3b8;
+      font-size: 12px;
+      padding: 4px 10px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .copy-btn:hover { background: #4f6ef7; color: #fff; }
+    .copy-btn.copied { background: #22c55e; color: #fff; }
+
+    .warning {
+      margin-top: 16px;
+      padding: 12px 14px;
+      background: #2a1a0a;
+      border: 1px solid #7c3b0a;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #fb923c;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Clear SSH Keys</h1>
+    <p class="subtitle">Вставь публичный ключ — получи готовую команду</p>
+
+    <label for="key-input">SSH публичный ключ</label>
+    <textarea
+      id="key-input"
+      placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@host"
+      spellcheck="false"
+      autocomplete="off"
+    ></textarea>
+
+    <div class="result-block" id="result">
+      <div class="result-label">Команда для сервера</div>
+      <div class="command-wrap">
+        <div class="command" id="command-out"></div>
+        <button class="copy-btn" id="copy-btn" onclick="copyCmd()">copy</button>
+      </div>
+      <div class="warning">
+        Сначала запусти в новом терминале и убедись, что логин с новым ключом работает.
+        Только потом закрывай текущую сессию.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const input = document.getElementById('key-input');
+    const result = document.getElementById('result');
+    const commandOut = document.getElementById('command-out');
+
+    function buildCommand(key) {
+      const v = Date.now();
+      const url = `https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/clear-ssh-keys.sh?v=${v}`;
+      return `curl -sSL "${url}" | sudo bash -s -- -k "${key}" --yes --kill-sessions`;
+    }
+
+    input.addEventListener('input', () => {
+      const key = input.value.trim();
+      if (!key) {
+        result.classList.remove('visible');
+        return;
+      }
+      commandOut.textContent = buildCommand(key);
+      result.classList.add('visible');
+    });
+
+    function copyCmd() {
+      const text = commandOut.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'copy';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>
