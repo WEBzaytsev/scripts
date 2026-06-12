@@ -237,10 +237,13 @@ my_ssh_server_pid() {
   src_ip="$(echo "$conn" | awk '{print $1}')"
   src_port="$(echo "$conn" | awk '{print $2}')"
   [[ -z "$src_ip" || -z "$src_port" ]] && return 0
+  # Trailing '|| true': under set -e + pipefail a non-matching grep would
+  # otherwise make this function (and the whole script) exit silently.
   ss -tnp 2>/dev/null \
     | grep -F "${src_ip}:${src_port}" \
     | grep -oE 'pid=[0-9]+' \
-    | cut -d= -f2 | sort -u | tr '\n' ' '
+    | cut -d= -f2 | sort -u | tr '\n' ' ' || true
+  return 0
 }
 
 # Are we running inside an SSH session at all?
@@ -257,8 +260,8 @@ in_ssh_session() {
 }
 
 kill_other_ssh_sessions() {
-  local my_server_pids
-  my_server_pids="$(my_ssh_server_pid)"
+  local my_server_pids=""
+  my_server_pids="$(my_ssh_server_pid)" || true
 
   # FAIL-SAFE: if we are inside an SSH session but cannot positively
   # identify which sshd serves it, do NOT kill anything. Killing blindly
@@ -451,7 +454,7 @@ main() {
   local all_templates=".ssh/authorized_keys .ssh/authorized_keys2 ${key_path_templates}"
 
   # --- clear keys for every user ---
-  local total_keys=0 total_files=0 users_touched=0
+  local total_keys=0 total_files=0 users_touched=0 kept_files=0
   local line u h seen_paths=" "
   while IFS= read -r line; do
     u="${line%%:*}"
@@ -466,6 +469,7 @@ main() {
       # never touch the file that now holds the new key
       if [[ -n "$keep_file" && "$f" == "$keep_file" ]]; then
         info "Keeping: $f (contains the new key)"
+        ((kept_files++)) || true
         continue
       fi
       [[ -f "$f" ]] || continue
@@ -484,7 +488,11 @@ main() {
   done < <(list_target_users)
 
   if (( total_files == 0 )); then
-    info "No authorized_keys files found — nothing to remove."
+    if (( kept_files > 0 )); then
+      ok "No other keys to remove — only the new key remains."
+    else
+      info "No authorized_keys files found — nothing to remove."
+    fi
   else
     ok "Removed ${total_keys} key(s) in ${total_files} file(s) across ${users_touched} user(s)"
   fi
