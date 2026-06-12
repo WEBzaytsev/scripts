@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clear SSH Keys</title>
+  <title>Revoke SSH Keys</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -40,7 +40,7 @@
       margin-bottom: 28px;
     }
 
-    label {
+    .field-label {
       display: block;
       font-size: 13px;
       color: #94a3b8;
@@ -64,6 +64,55 @@
 
     textarea:focus { border-color: #4f6ef7; }
     textarea::placeholder { color: #3d4460; }
+
+    .options {
+      display: flex;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .opt {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 9px 14px;
+      cursor: pointer;
+      user-select: none;
+      transition: border-color 0.15s;
+      flex: 1;
+    }
+
+    .opt:hover { border-color: #4f6ef7; }
+
+    .opt input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #4f6ef7;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .opt-text {
+      font-size: 13px;
+      color: #94a3b8;
+      line-height: 1.3;
+    }
+
+    .opt-text strong {
+      display: block;
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 1px;
+    }
+
+    .opt-text span {
+      font-size: 11px;
+      color: #475569;
+    }
 
     .result-block {
       margin-top: 24px;
@@ -128,10 +177,10 @@
 </head>
 <body>
   <div class="card">
-    <h1>Clear SSH Keys</h1>
+    <h1>Revoke SSH Keys</h1>
     <p class="subtitle">Вставь публичный ключ — получи готовую команду</p>
 
-    <label for="key-input">SSH публичный ключ</label>
+    <label class="field-label" for="key-input">SSH публичный ключ</label>
     <textarea
       id="key-input"
       placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@host"
@@ -139,8 +188,25 @@
       autocomplete="off"
     ></textarea>
 
+    <div class="options">
+      <label class="opt">
+        <input type="checkbox" id="cleanup-before" checked>
+        <div class="opt-text">
+          <strong>Удалить до</strong>
+          <span>rm старой скачанной копии скрипта</span>
+        </div>
+      </label>
+      <label class="opt">
+        <input type="checkbox" id="cleanup-after" checked>
+        <div class="opt-text">
+          <strong>Удалить после</strong>
+          <span>rm скрипта после выполнения</span>
+        </div>
+      </label>
+    </div>
+
     <div class="result-block" id="result">
-      <div class="result-label">Команда для сервера</div>
+      <div class="result-label" style="margin-top:24px;">Команда для сервера</div>
       <div class="command-wrap">
         <div class="command" id="command-out"></div>
         <button class="copy-btn" id="copy-btn" onclick="copyCmd()">copy</button>
@@ -153,40 +219,43 @@
   </div>
 
   <script>
-    const input = document.getElementById('key-input');
-    const result = document.getElementById('result');
-    const commandOut = document.getElementById('command-out');
+    const input          = document.getElementById('key-input');
+    const result         = document.getElementById('result');
+    const commandOut     = document.getElementById('command-out');
+    const chkBefore      = document.getElementById('cleanup-before');
+    const chkAfter       = document.getElementById('cleanup-after');
+
+    const CLEANUP = `rm -f -- ./revoke-ssh-keys.sh ~/revoke-ssh-keys.sh /tmp/revoke-ssh-keys.sh /root/revoke-ssh-keys.sh 2>/dev/null`;
 
     function buildCommand(key) {
-      const v = Date.now();
-      // raw.githubusercontent serves the fresh version immediately.
-      // jsDelivr caches @main and ignores ?v=, so it can return a stale script.
+      const v   = Date.now();
       const url = `https://raw.githubusercontent.com/WEBzaytsev/scripts/main/revoke-ssh-keys.sh?v=${v}`;
       const run = `curl -sSL "${url}" | sudo bash -s -- -k "${key}" --yes --kill-sessions`;
-      const cleanup = `rm -f -- ./revoke-ssh-keys.sh ~/revoke-ssh-keys.sh /tmp/revoke-ssh-keys.sh /root/revoke-ssh-keys.sh 2>/dev/null`;
-      return `${cleanup}; ${run}; ${cleanup}`;
+
+      const parts = [];
+      if (chkBefore.checked) parts.push(CLEANUP);
+      parts.push(run);
+      if (chkAfter.checked)  parts.push(CLEANUP);
+      return parts.join('; ');
     }
 
-    input.addEventListener('input', () => {
+    function update() {
       const key = input.value.trim();
-      if (!key) {
-        result.classList.remove('visible');
-        return;
-      }
+      if (!key) { result.classList.remove('visible'); return; }
       commandOut.textContent = buildCommand(key);
       result.classList.add('visible');
-    });
+    }
+
+    input.addEventListener('input', update);
+    chkBefore.addEventListener('change', update);
+    chkAfter.addEventListener('change', update);
 
     function copyCmd() {
-      const text = commandOut.textContent;
-      navigator.clipboard.writeText(text).then(() => {
+      navigator.clipboard.writeText(commandOut.textContent).then(() => {
         const btn = document.getElementById('copy-btn');
         btn.textContent = 'copied!';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.textContent = 'copy';
-          btn.classList.remove('copied');
-        }, 1500);
+        setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
       });
     }
   </script>
