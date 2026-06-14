@@ -17,91 +17,52 @@
 
 set -euo pipefail
 
+SCRIPTS_RAW_BASE="${SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/WEBzaytsev/scripts/main}"
+
+_bootstrap_lib() {
+  [[ -n "${SCRIPTS_COMMON_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/common.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/common.sh?v=$(date +%s)" -o "$tmp" \
+      || { echo "[ERROR] Failed to fetch lib/common.sh" >&2; rm -f "$tmp"; exit 1; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_ssh_lib() {
+  [[ -n "${SCRIPTS_SSH_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/ssh.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/ssh.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/ssh.sh?v=$(date +%s)" -o "$tmp" \
+      || { die "Failed to fetch lib/ssh.sh"; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_lib
+_bootstrap_ssh_lib
+
+# ---------- constants ----------
+
 SSHD_MAIN="/etc/ssh/sshd_config"
 SSHD_D_DIR="/etc/ssh/sshd_config.d"
-
 TS="$(date +%Y%m%d-%H%M%S)"
-
-ok()   { echo "[OK] $*"; }
-info() { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-die()  { echo "[ERROR] $*" >&2; exit 1; }
-
-is_root() { [[ "${EUID}" -eq 0 ]]; }
-has_systemd() { command -v systemctl >/dev/null 2>&1; }
-has_tty() { [[ -r /dev/tty ]]; }
-
-mk_backup() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  cp -f "$f" "${f}.bak.${TS}"
-  ok "Backup: ${f}.bak.${TS}"
-}
-
-read_tty() {
-  local __var="$1" __prompt="$2" __tmp=""
-  has_tty || return 1
-  if ! IFS= read -r -p "$__prompt" __tmp </dev/tty; then return 1; fi
-  printf -v "$__var" "%s" "$__tmp"
-}
-
-prompt_yn() {
-  local msg="$1" def="${2:-y}" ans
-  while true; do
-    read_tty ans "${msg} [y/n] (default: ${def}): " || return 1
-    ans="${ans:-$def}"
-    ans="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    case "$ans" in
-      y|yes) return 0 ;;
-      n|no)  return 1 ;;
-      *) warn "Invalid input: '$ans'. Enter y or n." ;;
-    esac
-  done
-}
-
-# ---------- new key handling ----------
-
-current_user() { [[ -n "${SUDO_USER:-}" ]] && echo "$SUDO_USER" || echo "$USER"; }
-current_home() { [[ -n "${SUDO_USER:-}" ]] && eval echo "~$SUDO_USER" || echo "$HOME"; }
-
-read_key() {
-  local key=""
-  if [[ -n "${1:-}" ]]; then
-    key="$1"
-  else
-    key="$(cat || true)"
-  fi
-
-  key="$(echo "$key" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  key="$(echo "$key" | grep -v '^[[:space:]]*$' | head -1 || true)"
-  [[ -n "$key" ]] || die "No SSH public key provided"
-  echo "$key"
-}
-
-valid_key() {
-  local k="$1"
-  [[ "$k" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-dss)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]] && return 0
-  if command -v ssh-keygen >/dev/null 2>&1; then
-    echo "$k" | ssh-keygen -l -f - >/dev/null 2>&1 && return 0
-  fi
-  return 1
-}
-
-# Install the new key as the ONLY content of the target user's authorized_keys
-install_new_key() {
-  local key="$1" user="$2" home="$3"
-  local dir="${home}/.ssh" ak="${home}/.ssh/authorized_keys"
-
-  mkdir -p "$dir"
-  chmod 700 "$dir"
-  chown "$user:$user" "$dir" 2>/dev/null || true
-
-  mk_backup "$ak"
-  echo "$key" >"$ak"
-  chmod 600 "$ak"
-  chown "$user:$user" "$ak" 2>/dev/null || true
-  ok "Installed new key as the only key in $ak"
-}
 
 # ---------- users enumeration ----------
 
@@ -113,36 +74,45 @@ list_target_users() {
       done
 }
 
-# ---------- key counting / removal ----------
+# ---------- key install / counting ----------
+
+# Install the new key as the ONLY content of the target user's authorized_keys
+install_new_key() {
+  local key="$1" user="$2" home="$3"
+  local dir="${home}/.ssh" ak="${home}/.ssh/authorized_keys"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  chown "$user:$user" "$dir" 2>/dev/null || true
+  mk_backup "$ak"
+  echo "$key" >"$ak"
+  chmod 600 "$ak"
+  chown "$user:$user" "$ak" 2>/dev/null || true
+  ok "Installed new key as the only key in $ak"
+}
 
 count_keys() {
   local f="$1" n
   [[ -f "$f" ]] || { echo 0; return; }
-  # grep -c exits 1 when count is 0, so don't let it trigger the fallback echo
+  # grep -c exits 1 when count is 0, so guard with || true
   n="$(grep -cEv '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)"
   echo "${n:-0}"
 }
 
 # ---------- AuthorizedKeysFile detection (backdoor check) ----------
 
-# Collect every AuthorizedKeysFile value from sshd_config and drop-ins.
-# Default if not set anywhere: ".ssh/authorized_keys .ssh/authorized_keys2"
 collect_authorized_keys_paths() {
   local files=() f
   [[ -f "$SSHD_MAIN" ]] && files+=("$SSHD_MAIN")
   if [[ -d "$SSHD_D_DIR" ]]; then
     while IFS= read -r f; do files+=("$f"); done < <(find "$SSHD_D_DIR" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | sort)
   fi
-
   local paths=""
   for f in "${files[@]}"; do
-    # Take directive lines, strip the keyword, collect all path tokens
     local vals
     vals="$(grep -iE '^[[:space:]]*AuthorizedKeysFile[[:space:]]' "$f" 2>/dev/null \
       | sed -E 's/^[[:space:]]*[Aa]uthorized[Kk]eys[Ff]ile[[:space:]]+//' || true)"
     [[ -n "$vals" ]] && paths+="${vals} "
   done
-
   if [[ -z "${paths// /}" ]]; then
     echo ".ssh/authorized_keys .ssh/authorized_keys2"
   else
@@ -157,7 +127,6 @@ is_standard_keys_path() {
   esac
 }
 
-# Expand sshd tokens (%h, %u, %%) and resolve relative paths against home
 expand_keys_path() {
   local tpl="$1" user="$2" home="$3"
   local p="$tpl"
@@ -168,12 +137,8 @@ expand_keys_path() {
   echo "$p"
 }
 
-# ---------- kill other ssh sessions ----------
+# ---------- kill other SSH sessions ----------
 
-# Robustly read PPID from /proc/PID/stat.
-# comm (field 2) may contain spaces and ')', e.g. "(sshd: root@pts/0)",
-# so we strip everything up to the LAST ')' and read fields after it:
-# <state> <ppid> ...  -> ppid is the 2nd token.
 get_ppid() {
   local stat rest
   stat="$(cat /proc/"$1"/stat 2>/dev/null)" || return 0
@@ -183,9 +148,6 @@ get_ppid() {
   echo "${2:-}"
 }
 
-# All PIDs in our ancestry chain (current process up to pid 1).
-# Protecting every ancestor guarantees we never kill the sshd/sshd-session
-# that serves the CURRENT shell, regardless of how deep sudo/bash nest.
 my_ancestor_pids() {
   local pid=$$ chain="" guard=0
   while [[ -n "$pid" && "$pid" != "0" && "$pid" != "1" ]]; do
@@ -196,7 +158,6 @@ my_ancestor_pids() {
   echo "$chain"
 }
 
-# PIDs of sshd LISTENER processes (must not be killed)
 listener_sshd_pids() {
   local pids=""
   if command -v ss >/dev/null 2>&1; then
@@ -212,8 +173,6 @@ listener_sshd_pids() {
   echo "$pids"
 }
 
-# SSH_CONNECTION for the current shell. sudo strips it from our own env,
-# so we recover it from an ancestor process environ when needed.
 get_ssh_connection() {
   [[ -n "${SSH_CONNECTION:-}" ]] && { echo "$SSH_CONNECTION"; return 0; }
   local pid=$$ guard=0 v
@@ -228,7 +187,6 @@ get_ssh_connection() {
   return 0
 }
 
-# sshd PID serving THIS connection, matched by client ip:port via ss.
 my_ssh_server_pid() {
   command -v ss >/dev/null 2>&1 || return 0
   local conn src_ip src_port
@@ -237,8 +195,6 @@ my_ssh_server_pid() {
   src_ip="$(echo "$conn" | awk '{print $1}')"
   src_port="$(echo "$conn" | awk '{print $2}')"
   [[ -z "$src_ip" || -z "$src_port" ]] && return 0
-  # Trailing '|| true': under set -e + pipefail a non-matching grep would
-  # otherwise make this function (and the whole script) exit silently.
   ss -tnp 2>/dev/null \
     | grep -F "${src_ip}:${src_port}" \
     | grep -oE 'pid=[0-9]+' \
@@ -246,7 +202,6 @@ my_ssh_server_pid() {
   return 0
 }
 
-# Are we running inside an SSH session at all?
 in_ssh_session() {
   [[ -n "$(get_ssh_connection)" ]] && return 0
   local pid=$$ guard=0 stat
@@ -262,10 +217,6 @@ in_ssh_session() {
 kill_other_ssh_sessions() {
   local my_server_pids=""
   my_server_pids="$(my_ssh_server_pid)" || true
-
-  # FAIL-SAFE: if we are inside an SSH session but cannot positively
-  # identify which sshd serves it, do NOT kill anything. Killing blindly
-  # is how a remote admin locks themselves out.
   if in_ssh_session && [[ -z "${my_server_pids// /}" ]]; then
     warn "Could not positively identify the sshd of the CURRENT session."
     warn "Refusing to kill any SSH sessions to avoid locking you out."
@@ -274,16 +225,12 @@ kill_other_ssh_sessions() {
     warn "  kill <other_session_pids>"
     return 0
   fi
-
   local keep=" $(listener_sshd_pids) $(my_ancestor_pids) ${my_server_pids} "
   if [[ -n "${my_server_pids// /}" ]]; then
     info "Current session sshd pid(s):${my_server_pids} (protected)"
   fi
-
-  # Match both classic 'sshd' (per-connection) and 'sshd-session' (OpenSSH 9.8+)
   local candidates
   candidates="$( { pgrep -x sshd 2>/dev/null; pgrep -x sshd-session 2>/dev/null; } | sort -u || true)"
-
   local killed=0 pid comm
   for pid in $candidates; do
     [[ "$keep" == *" $pid "* ]] && continue
@@ -291,7 +238,7 @@ kill_other_ssh_sessions() {
     [[ "$comm" == "sshd" || "$comm" == "sshd-session" ]] || continue
     info "Killing SSH session process (pid=$pid, $comm)"
     kill "$pid" 2>/dev/null || true
-    ((killed++)) || true
+    (( killed++ )) || true
   done
   if (( killed > 0 )); then
     sleep 1
@@ -307,12 +254,6 @@ kill_other_ssh_sessions() {
 
 # ---------- host keys regeneration ----------
 
-unit_present() {
-  local u="$1"
-  has_systemd || return 1
-  systemctl cat "$u" >/dev/null 2>&1
-}
-
 restart_sshd() {
   if has_systemd; then
     systemctl daemon-reload || true
@@ -327,7 +268,6 @@ restart_sshd() {
         systemctl restart "$u" && { ok "Restarted $u"; return 0; }
       fi
     done
-    # fall through: try plain restart of service unit even if inactive
     for u in sshd.service ssh.service; do
       unit_present "$u" && systemctl restart "$u" 2>/dev/null && { ok "Restarted $u"; return 0; }
     done
@@ -341,18 +281,15 @@ regen_host_keys() {
   local bdir="/etc/ssh/host_keys_backup.${TS}"
   mkdir -p "$bdir"
   chmod 700 "$bdir"
-
   local moved=0 f
   for f in /etc/ssh/ssh_host_*; do
     [[ -e "$f" ]] || continue
     mv -f "$f" "$bdir"/
-    ((moved++)) || true
+    (( moved++ )) || true
   done
   ok "Moved ${moved} old host key file(s) to $bdir"
-
   ssh-keygen -A >/dev/null
   ok "Generated new host keys"
-
   restart_sshd || warn "Could not restart sshd automatically; restart it manually"
   warn "Clients will see a host key mismatch warning on next connect (expected)."
   warn "Fix locally with: ssh-keygen -R <host>"
@@ -406,19 +343,17 @@ main() {
     esac
   done
 
-  # --- validate new key up front (before any destructive action) ---
   local new_key="" keep_user="" keep_home="" keep_file=""
   if [[ "$key_mode" == "true" ]]; then
     keep_user="$(current_user)"
     keep_home="$(current_home)"
     [[ -d "$keep_home" ]] || die "Cannot determine home directory for user: $keep_user"
     new_key="$(read_key "${key_arg:-}")"
-    valid_key "$new_key" || die "Invalid SSH public key format"
+    valid_ssh_key "$new_key" || die "Invalid SSH public key format"
     keep_file="${keep_home}/.ssh/authorized_keys"
     info "New key will be installed for user '$keep_user' and kept after cleanup"
   fi
 
-  # --- confirm ---
   if [[ "$assume_yes" != "true" ]]; then
     has_tty || die "No TTY for confirmation. Use --yes."
     echo
@@ -432,12 +367,10 @@ main() {
     prompt_yn "Continue?" "n" || { echo "Cancelled"; exit 0; }
   fi
 
-  # --- install new key FIRST (no window without access) ---
   if [[ "$key_mode" == "true" ]]; then
     install_new_key "$new_key" "$keep_user" "$keep_home"
   fi
 
-  # --- collect AuthorizedKeysFile paths (backdoor check) ---
   local key_path_templates
   key_path_templates="$(collect_authorized_keys_paths)"
   info "AuthorizedKeysFile paths in effect: ${key_path_templates}"
@@ -450,10 +383,7 @@ main() {
     fi
   done
 
-  # Always clear the defaults too, even if sshd_config overrides them
   local all_templates=".ssh/authorized_keys .ssh/authorized_keys2 ${key_path_templates}"
-
-  # --- clear keys for every user ---
   local total_keys=0 total_files=0 users_touched=0 kept_files=0
   local line u h seen_paths=" "
   while IFS= read -r line; do
@@ -463,13 +393,11 @@ main() {
     for tpl in $all_templates; do
       [[ "$tpl" == "none" ]] && continue
       f="$(expand_keys_path "$tpl" "$u" "$h")"
-      # dedupe (defaults may repeat the configured paths)
       [[ "$seen_paths" == *" $f "* ]] && continue
       seen_paths+="$f "
-      # never touch the file that now holds the new key
       if [[ -n "$keep_file" && "$f" == "$keep_file" ]]; then
         info "Keeping: $f (contains the new key)"
-        ((kept_files++)) || true
+        (( kept_files++ )) || true
         continue
       fi
       [[ -f "$f" ]] || continue
@@ -479,11 +407,11 @@ main() {
       ok "Removed: $f (${n} key(s))"
       total_keys=$(( total_keys + n ))
       user_keys=$(( user_keys + n ))
-      ((total_files++)) || true
+      (( total_files++ )) || true
     done
     if (( user_keys > 0 )); then
       info "User '$u': removed ${user_keys} key(s)"
-      ((users_touched++)) || true
+      (( users_touched++ )) || true
     fi
   done < <(list_target_users)
 
@@ -497,7 +425,6 @@ main() {
     ok "Removed ${total_keys} key(s) in ${total_files} file(s) across ${users_touched} user(s)"
   fi
 
-  # --- kill other sessions ---
   if [[ "$do_kill" == "ask" && "$assume_yes" != "true" ]] && has_tty; then
     if prompt_yn "Kill all OTHER active SSH sessions (attacker may still be connected)?" "y"; then
       do_kill="true"
@@ -511,12 +438,10 @@ main() {
     warn "Other SSH sessions were NOT killed (use --kill-sessions). Active sessions survive key removal!"
   fi
 
-  # --- regenerate host keys ---
   if [[ "$do_regen" == "true" ]]; then
     regen_host_keys
   fi
 
-  # --- final message ---
   echo
   ok "SSH keys cleared. Backups: *.bak.${TS}"
   if [[ "$key_mode" == "true" ]]; then

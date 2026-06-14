@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# docker-aliases-install.sh — system-wide docker compose aliases, reliable across bash/zsh modes
+# docker-aliases.sh — system-wide docker compose aliases, reliable across bash/zsh modes
 #
 # Install:
 #   - /etc/profile.d/docker-aliases.sh  (aliases definition)
@@ -7,7 +7,7 @@
 #   - /etc/zsh/zshrc                    (loads aliases for interactive zsh, if present)
 #
 # Usage:
-#   sudo ./docker-aliases-install.sh
+#   sudo ./docker-aliases.sh
 #   curl -fsSL "URL?v=$(date +%s)" | sudo bash
 #
 # Options:
@@ -16,16 +16,32 @@
 
 set -euo pipefail
 
-ok()   { echo "[OK] $*"; }
-info() { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-die()  { echo "[ERROR] $*" >&2; exit 1; }
+SCRIPTS_RAW_BASE="${SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/WEBzaytsev/scripts/main}"
 
-is_root() { [[ "${EUID}" -eq 0 ]]; }
+_bootstrap_lib() {
+  [[ -n "${SCRIPTS_COMMON_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/common.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/common.sh?v=$(date +%s)" -o "$tmp" \
+      || { echo "[ERROR] Failed to fetch lib/common.sh" >&2; rm -f "$tmp"; exit 1; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_lib
+
+# ---------- constants ----------
 
 PROFILE_D_DIR="/etc/profile.d"
 ALIASES_FILE="${PROFILE_D_DIR}/docker-aliases.sh"
-
 BASH_SYSTEM_RC="/etc/bash.bashrc"
 ZSH_SYSTEM_RC="/etc/zsh/zshrc"
 
@@ -35,32 +51,7 @@ MARKER_END="# <<< docker-aliases (managed) <<<"
 BASH_LOADER_LINE='[[ -f /etc/profile.d/docker-aliases.sh ]] && . /etc/profile.d/docker-aliases.sh'
 ZSH_LOADER_LINE='[[ -f /etc/profile.d/docker-aliases.sh ]] && source /etc/profile.d/docker-aliases.sh'
 
-mk_backup() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  cp -f "$f" "${f}.bak.${ts}"
-  ok "Backup: ${f}.bak.${ts}"
-}
-
-write_atomic() {
-  local dst="$1" tmp
-  mkdir -p "$(dirname "$dst")"
-  tmp="$(mktemp "${dst}.tmp.XXXXXX")"
-  cat >"$tmp"
-  chmod 0644 "$tmp" || true
-  mv -f "$tmp" "$dst"
-}
-
-strip_managed_block() {
-  local f="$1"
-  [[ -f "$f" ]] || { echo ""; return 0; }
-  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    $0==b {inblk=1; next}
-    $0==e {inblk=0; next}
-    !inblk {print}
-  ' "$f"
-}
+# ---------- aliases content ----------
 
 aliases_block_content() {
   cat <<'EOF'
@@ -92,6 +83,18 @@ alias dccf='docker exec -w /etc/caddy caddy caddy fmt --overwrite && docker exec
 alias docker-compose='docker compose'
 # <<< docker-aliases (managed) <<<
 EOF
+}
+
+# ---------- managed block helpers ----------
+
+strip_managed_block() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo ""; return 0; }
+  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+    $0==b {inblk=1; next}
+    $0==e {inblk=0; next}
+    !inblk {print}
+  ' "$f"
 }
 
 ensure_aliases_file() {
@@ -132,14 +135,11 @@ ensure_line_once() {
 }
 
 install_loaders() {
-  # bash: required for your case
   if [[ -f "$BASH_SYSTEM_RC" ]]; then
     ensure_line_once "$BASH_SYSTEM_RC" "$BASH_LOADER_LINE" || true
   else
     warn "No $BASH_SYSTEM_RC found; bash non-login shells may not load aliases automatically."
   fi
-
-  # zsh: best effort
   if [[ -f "$ZSH_SYSTEM_RC" ]]; then
     ensure_line_once "$ZSH_SYSTEM_RC" "$ZSH_LOADER_LINE" || true
   else
@@ -149,37 +149,29 @@ install_loaders() {
 
 uninstall() {
   info "Uninstalling managed blocks/lines..."
-
   if [[ -f "$ALIASES_FILE" ]]; then
-    local stripped
-    stripped="$(strip_managed_block "$ALIASES_FILE")"
+    local stripped; stripped="$(strip_managed_block "$ALIASES_FILE")"
     mk_backup "$ALIASES_FILE"
     write_atomic "$ALIASES_FILE" <<<"$stripped"
     ok "Removed managed block from: $ALIASES_FILE"
   else
     ok "No aliases file: $ALIASES_FILE"
   fi
-
   if [[ -f "$BASH_SYSTEM_RC" ]]; then
     mk_backup "$BASH_SYSTEM_RC"
     sed -i '\|^\[\[ -f /etc/profile\.d/docker-aliases\.sh \]\] && \. /etc/profile\.d/docker-aliases\.sh$|d' "$BASH_SYSTEM_RC" || true
     ok "Cleaned loader line from: $BASH_SYSTEM_RC"
   fi
-
   if [[ -f "$ZSH_SYSTEM_RC" ]]; then
     mk_backup "$ZSH_SYSTEM_RC"
     sed -i '\|^\[\[ -f /etc/profile\.d/docker-aliases\.sh \]\] && source /etc/profile\.d/docker-aliases\.sh$|d' "$ZSH_SYSTEM_RC" || true
     ok "Cleaned loader line from: $ZSH_SYSTEM_RC"
   fi
-
   ok "Uninstall complete."
 }
 
 post_check() {
   info "Post-check: bash -ic 'type dcpu'"
-  # NOTE: when run via `curl | sudo bash`, stdin is the curl pipe.
-  # An interactive `bash -i` inherits that pipe and hangs reading from it,
-  # so we must detach stdin (</dev/null) and guard with a timeout.
   local check_cmd=(bash -ic 'type dcpu')
   if command -v timeout >/dev/null 2>&1; then
     check_cmd=(timeout 10 "${check_cmd[@]}")
@@ -197,6 +189,8 @@ post_check() {
     die "Post-check failed"
   fi
 }
+
+# ---------- main ----------
 
 main() {
   is_root || die "Run as root (sudo)."

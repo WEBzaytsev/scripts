@@ -11,6 +11,49 @@
 
 set -euo pipefail
 
+SCRIPTS_RAW_BASE="${SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/WEBzaytsev/scripts/main}"
+
+_bootstrap_lib() {
+  [[ -n "${SCRIPTS_COMMON_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/common.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/common.sh?v=$(date +%s)" -o "$tmp" \
+      || { echo "[ERROR] Failed to fetch lib/common.sh" >&2; rm -f "$tmp"; exit 1; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_ssh_lib() {
+  [[ -n "${SCRIPTS_SSH_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/ssh.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/ssh.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/ssh.sh?v=$(date +%s)" -o "$tmp" \
+      || { die "Failed to fetch lib/ssh.sh"; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_lib
+_bootstrap_ssh_lib
+
+# ---------- constants ----------
+
 SSHD_MAIN="/etc/ssh/sshd_config"
 SSHD_D_DIR="/etc/ssh/sshd_config.d"
 SSHD_DROPIN="${SSHD_D_DIR}/99-custom.conf"
@@ -22,16 +65,6 @@ MAX_PORT=65000
 MAX_AUTH_TRIES_DEFAULT="6"
 MAX_SESSIONS_DEFAULT="4"
 MAX_STARTUPS_DEFAULT="10:30:60"
-
-ok()   { echo "[OK] $*"; }
-info() { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-die()  { echo "[ERROR] $*" >&2; exit 1; }
-
-need() { command -v "$1" >/dev/null 2>&1 || die "Command not found: $1"; }
-is_root() { [[ "${EUID}" -eq 0 ]]; }
-has_systemd() { command -v systemctl >/dev/null 2>&1; }
-has_tty() { [[ -r /dev/tty ]]; }
 
 # ---------- sshd binary / config test ----------
 
@@ -54,7 +87,6 @@ test_sshd() {
 ensure_run_sshd() {
   mkdir -p /run/sshd
   chmod 0755 /run/sshd
-
   if [[ -d /etc/tmpfiles.d ]]; then
     echo "d /run/sshd 0755 root root -" >/etc/tmpfiles.d/sshd.conf
     ok "Registered /run/sshd in /etc/tmpfiles.d/sshd.conf (survives reboots)"
@@ -63,32 +95,7 @@ ensure_run_sshd() {
   fi
 }
 
-# ---------- backups / atomic write ----------
-
-mk_backup() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  cp -f "$f" "${f}.bak.${ts}"
-  ok "Backup: ${f}.bak.${ts}"
-}
-
-write_atomic() {
-  local dst="$1" tmp
-  mkdir -p "$(dirname "$dst")"
-  tmp="$(mktemp "${dst}.tmp.XXXXXX")"
-  cat >"$tmp"
-  chmod 0644 "$tmp" || true
-  mv -f "$tmp" "$dst"
-}
-
 # ---------- systemd unit detection ----------
-
-unit_present() {
-  local u="$1"
-  has_systemd || return 1
-  systemctl cat "$u" >/dev/null 2>&1
-}
 
 choose_ssh_service_unit() {
   unit_present "sshd.service" && { echo "sshd.service"; return; }
@@ -103,7 +110,6 @@ choose_ssh_socket_unit() {
 }
 
 detect_mode() {
-  # Outputs: service|socket|legacy
   if has_systemd; then
     local svc sock
     svc="$(choose_ssh_service_unit)"
@@ -150,7 +156,6 @@ verify_listening() {
   for i in {1..12}; do
     sleep 1
     if command -v ss >/dev/null 2>&1; then
-      # match :PORT and ]:PORT
       ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${port}$" && return 0
     elif command -v netstat >/dev/null 2>&1; then
       netstat -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${port}$" && return 0
@@ -167,133 +172,13 @@ apply_sshd_dropin() {
   mk_backup "$SSHD_DROPIN"
   write_atomic "$SSHD_DROPIN" <<<"$content"
   ok "Wrote drop-in: $SSHD_DROPIN"
-
   test_sshd || die "Invalid sshd config after writing $SSHD_DROPIN. Run: $(sshd_bin) -t"
   ok "sshd config test OK"
 }
 
-# ---------- port helpers (FIXED for IPv6) ----------
+# ---------- systemd socket drop-in ----------
 
-valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] || return 1
-  (( "$1" >= 1024 && "$1" <= 65535 )) || return 1
-  return 0
-}
-
-port_in_use() {
-  local p="$1"
-  if command -v ss >/dev/null 2>&1; then
-    # match:
-    # 0.0.0.0:PORT, 127.0.0.1:PORT, [::]:PORT, [::1]:PORT
-    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${p}$"
-    return $?
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${p}$"
-    return $?
-  fi
-  return 1
-}
-
-rand_port() {
-  local tries=0 max_tries=400 p
-  while (( tries < max_tries )); do
-    if command -v shuf >/dev/null 2>&1; then
-      p="$(shuf -i "${MIN_PORT}-${MAX_PORT}" -n 1)"
-    else
-      p=$(( (RANDOM % (MAX_PORT - MIN_PORT + 1)) + MIN_PORT ))
-    fi
-    if ! port_in_use "$p"; then
-      echo "$p"
-      return 0
-    fi
-    ((tries++))
-  done
-  die "Failed to find free port after $max_tries tries"
-}
-
-read_tty() {
-  local __var="$1" __prompt="$2" __tmp=""
-  has_tty || return 1
-  if ! IFS= read -r -p "$__prompt" __tmp </dev/tty; then return 1; fi
-  printf -v "$__var" "%s" "$__tmp"
-}
-
-prompt_yn() {
-  local msg="$1" def="${2:-y}" ans
-  while true; do
-    read_tty ans "${msg} [y/n] (default: ${def}): " || return 1
-    ans="${ans:-$def}"
-    ans="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    case "$ans" in
-      y|yes) return 0 ;;
-      n|no)  return 1 ;;
-      *) warn "Invalid input: '$ans'. Enter y or n." ;;
-    esac
-  done
-}
-
-# ---------- key handling ----------
-
-current_user() { [[ -n "${SUDO_USER:-}" ]] && echo "$SUDO_USER" || echo "$USER"; }
-current_home() { [[ -n "${SUDO_USER:-}" ]] && eval echo "~$SUDO_USER" || echo "$HOME"; }
-
-read_key() {
-  local key=""
-  if [[ -n "${1:-}" ]]; then
-    key="$1"
-  else
-    key="$(cat || true)"
-  fi
-
-  key="$(echo "$key" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  key="$(echo "$key" | grep -v '^[[:space:]]*$' | head -1 || true)"
-  [[ -n "$key" ]] || die "No SSH public key provided"
-  echo "$key"
-}
-
-valid_key() {
-  local k="$1"
-  [[ "$k" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-dss)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]] && return 0
-  if command -v ssh-keygen >/dev/null 2>&1; then
-    echo "$k" | ssh-keygen -l -f - >/dev/null 2>&1 && return 0
-  fi
-  return 1
-}
-
-ensure_ssh_dir() {
-  local home="$1" user="$2"
-  local dir="${home}/.ssh"
-  mkdir -p "$dir"
-  chmod 700 "$dir"
-  chown "$user:$user" "$dir" 2>/dev/null || true
-}
-
-add_authorized_key() {
-  local key="$1" home="$2" user="$3"
-  local ak="${home}/.ssh/authorized_keys"
-
-  touch "$ak"
-  chmod 600 "$ak"
-  chown "$user:$user" "$ak" 2>/dev/null || true
-
-  if grep -Fxq "$key" "$ak" 2>/dev/null; then
-    warn "Key already present in authorized_keys"
-    return 1
-  fi
-
-  mk_backup "$ak"
-  echo "$key" >>"$ak"
-  ok "Key added to $ak"
-  return 0
-}
-
-# ---------- systemd socket drop-in (FIXED: avoid IPv6 conflicts) ----------
-
-socket_dropin_path() {
-  local sock_unit="$1"
-  echo "/etc/systemd/system/${sock_unit}.d/99-custom.conf"
-}
+socket_dropin_path() { echo "/etc/systemd/system/${1}.d/99-custom.conf"; }
 
 have_ipv6() {
   [[ -f /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 2>/dev/null
@@ -303,17 +188,12 @@ apply_socket_port_dropin() {
   local sock_unit="$1" port="$2"
   local path; path="$(socket_dropin_path "$sock_unit")"
 
-  # Default: IPv4 only (most reliable).
-  # Add IPv6 only if host has IPv6 and port doesn't look occupied on IPv6.
   local content
   if have_ipv6; then
-    # If any listener already uses this port on IPv6, skip IPv6.
-    # We already checked port_in_use() globally, but this is extra safety.
     local ipv6_busy="false"
     if command -v ss >/dev/null 2>&1; then
       ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "^\[.*\]:${port}$" && ipv6_busy="true"
     fi
-
     if [[ "$ipv6_busy" == "false" ]]; then
       content="$(cat <<EOF
 # Managed by ssh-config.sh
@@ -358,89 +238,55 @@ print_unit_debug() {
   journalctl -u "$unit" -b --no-pager -n 30 >&2 || true
 }
 
-# Kill any sshd listener that systemd does NOT manage.
-#
-# Why: on Ubuntu with socket activation, if a "stale" sshd is already
-# holding the port (e.g. manually started, survived a failed reload),
-# systemd cannot bind its socket and reports
-# "A dependency job for ssh.service failed".
-# We only kill the master listener process (the one with an open
-# LISTEN socket). Per-session child sshd processes are left alone so
-# that existing SSH sessions are not dropped.
 kill_unmanaged_sshd_listener() {
   local svc="${1:-}" sock="${2:-}"
-
-  # PID that systemd considers the current service main process (0 if none)
   local systemd_pid="0"
   if [[ -n "$svc" ]] && has_systemd; then
     systemd_pid="$(systemctl show "$svc" -p MainPID --value 2>/dev/null || echo 0)"
   fi
-
-  # Find listener PIDs via ss (processes with a LISTEN socket labelled sshd)
   local listener_pids
   listener_pids="$(ss -tlnp 2>/dev/null \
     | grep -oE 'pid=[0-9]+' \
     | cut -d= -f2 \
     | sort -u || true)"
-
-  local killed=0
-  local pid
+  local killed=0 pid
   for pid in $listener_pids; do
     [[ -z "$pid" || "$pid" == "0" ]] && continue
-    # Skip if this is already the systemd-managed process
     [[ "$pid" == "$systemd_pid" ]] && continue
-    # Only kill actual sshd processes
-    local comm
-    comm="$(cat /proc/"$pid"/comm 2>/dev/null || true)"
+    local comm; comm="$(cat /proc/"$pid"/comm 2>/dev/null || true)"
     [[ "$comm" == sshd ]] || continue
     info "Stopping unmanaged sshd listener (pid=$pid)"
     kill "$pid" 2>/dev/null || true
-    ((killed++))
+    (( killed++ ))
   done
-
   [[ "$killed" -gt 0 ]] && sleep 1
   return 0
 }
 
 restart_ssh_once() {
   local mode="$1"
-
-  # Always ensure /run/sshd exists before attempting any restart.
-  # This is the most common reason sshd fails on tmpfs-based /run.
   ensure_run_sshd
-
   if has_systemd; then
     systemctl daemon-reload || true
-
     local svc sock
     svc="$(choose_ssh_service_unit)"
     sock="$(choose_ssh_socket_unit)"
-
     if [[ "$mode" == "service" && -n "$svc" ]]; then
       info "Restarting SSH via service unit: $svc"
-
       kill_unmanaged_sshd_listener "$svc" "$sock"
-
       systemctl unmask "$svc" >/dev/null 2>&1 || true
       systemctl enable "$svc" >/dev/null 2>&1 || true
-
-      # If a socket unit exists, stop it first so it doesn't conflict
-      # when the service tries to bind the port directly.
       if [[ -n "$sock" ]]; then
         systemctl stop "$sock" 2>/dev/null || true
         systemctl unmask "$sock" >/dev/null 2>&1 || true
       fi
-
       systemctl restart "$svc" || { print_unit_debug "$svc"; return 1; }
       ok "SSH restarted via $svc"
       return 0
     fi
-
     if [[ "$mode" == "socket" && -n "$sock" ]]; then
       info "Restarting SSH via socket activation: $sock"
-
       kill_unmanaged_sshd_listener "$svc" "$sock"
-
       systemctl unmask "$sock" >/dev/null 2>&1 || true
       systemctl enable --now "$sock" >/dev/null 2>&1 || true
       systemctl restart "$sock" || { print_unit_debug "$sock"; return 1; }
@@ -448,10 +294,27 @@ restart_ssh_once() {
       return 0
     fi
   fi
-
   info "Restarting SSH via legacy service command..."
   service sshd restart 2>/dev/null || service ssh restart 2>/dev/null || return 1
   ok "SSH restarted via legacy service command"
+  return 0
+}
+
+# ---------- key handling ----------
+
+add_authorized_key() {
+  local key="$1" home="$2" user="$3"
+  local ak="${home}/.ssh/authorized_keys"
+  touch "$ak"
+  chmod 600 "$ak"
+  chown "$user:$user" "$ak" 2>/dev/null || true
+  if grep -Fxq "$key" "$ak" 2>/dev/null; then
+    warn "Key already present in authorized_keys"
+    return 1
+  fi
+  mk_backup "$ak"
+  echo "$key" >>"$ak"
+  ok "Key added to $ak"
   return 0
 }
 
@@ -504,10 +367,7 @@ main() {
         port_value="$1"
         shift || true
         ;;
-      --random-port)
-        port_mode="random"
-        shift || true
-        ;;
+      --random-port) port_mode="random"; shift || true ;;
       -y|--yes) assume_yes="true"; shift || true ;;
       -h|--help) usage; exit 0 ;;
       *) die "Unknown option: $1" ;;
@@ -517,16 +377,14 @@ main() {
   local mode; mode="$(detect_mode)"
   local sock; sock="$(choose_ssh_socket_unit)"
 
-  # --- key path ---
+  # --- key handling ---
   if [[ "$key_mode" == "true" ]]; then
     local u h k
     u="$(current_user)"
     h="$(current_home)"
     [[ -d "$h" ]] || die "Cannot determine home directory for user: $u"
-
     k="$(read_key "${key_arg:-}")"
-    valid_key "$k" || die "Invalid SSH public key format"
-
+    valid_ssh_key "$k" || die "Invalid SSH public key format"
     info "Target user: $u"
     ensure_ssh_dir "$h" "$u"
     add_authorized_key "$k" "$h" "$u" || true
@@ -541,7 +399,7 @@ main() {
     new_port="$port_value"
   elif [[ "$port_mode" == "random" ]]; then
     do_port="true"
-    new_port="$(rand_port)"
+    new_port="$(rand_port "$MIN_PORT" "$MAX_PORT")"
     ok "Generated port: $new_port"
   else
     if [[ "$key_mode" == "false" ]]; then
@@ -549,7 +407,7 @@ main() {
       info "SSH port change mode"
       if prompt_yn "Generate random port?" "y"; then
         do_port="true"
-        new_port="$(rand_port)"
+        new_port="$(rand_port "$MIN_PORT" "$MAX_PORT")"
         ok "Generated port: $new_port"
       else
         local p
@@ -583,13 +441,11 @@ main() {
     prompt_yn "Continue?" "y" || { echo "Cancelled"; exit 0; }
   fi
 
-  # firewall/selinux
   if [[ "$do_port" == "true" ]]; then
     configure_firewall "$new_port"
     echo "$new_port" >"$PORT_MARKER" || true
   fi
 
-  # build ONE sshd drop-in (no double writes)
   local sshd_lines=()
   if [[ "$key_mode" == "true" ]]; then
     sshd_lines+=("PubkeyAuthentication yes")
@@ -601,7 +457,6 @@ main() {
     sshd_lines+=("MaxAuthTries ${MAX_AUTH_TRIES_DEFAULT}")
     sshd_lines+=("MaxSessions ${MAX_SESSIONS_DEFAULT}")
     sshd_lines+=("MaxStartups ${MAX_STARTUPS_DEFAULT}")
-    # Port only in non-socket modes
     if [[ "$mode" != "socket" ]]; then
       sshd_lines+=("Port ${new_port}")
     fi
@@ -612,30 +467,23 @@ main() {
     test_sshd || die "sshd config test failed"
   fi
 
-  # ---- apply + restart (with retry only for socket + random-port) ----
+  # ---- apply + restart ----
   if [[ "$mode" == "socket" && "$do_port" == "true" ]]; then
     [[ -n "$sock" ]] || die "socket mode detected but no ssh socket unit found"
-
     if [[ "$port_mode" == "random" ]]; then
       local tries=0 max=30
       while true; do
-        ((tries++))
-        # re-check port (IPv4/IPv6) right before applying
+        (( tries++ ))
         if port_in_use "$new_port"; then
-          new_port="$(rand_port)"
+          new_port="$(rand_port "$MIN_PORT" "$MAX_PORT")"
           ok "Generated port: $new_port"
           continue
         fi
-
         apply_socket_port_dropin "$sock" "$new_port"
-
-        if restart_ssh_once "socket"; then
-          break
-        fi
-
+        if restart_ssh_once "socket"; then break; fi
         warn "Socket restart failed on port $new_port (attempt $tries/$max). Picking new port..."
         [[ $tries -ge $max ]] && die "Failed to apply random port after $max attempts"
-        new_port="$(rand_port)"
+        new_port="$(rand_port "$MIN_PORT" "$MAX_PORT")"
         ok "Generated port: $new_port"
       done
     else
@@ -646,7 +494,6 @@ main() {
     restart_ssh_once "$mode" || die "Failed to restart SSH"
   fi
 
-  # verify + final message
   if [[ "$do_port" == "true" ]]; then
     if verify_listening "$new_port"; then
       ok "SSH is listening on port $new_port"

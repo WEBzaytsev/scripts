@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # docker-monitor.sh — setup dozzle + beszel agents via docker compose
-# Usage: sudo ./docker-monitor.sh
+#
+# Usage: sudo ./docker-monitor.sh [--hub-url URL]
 #
 # Notes:
 # - Requires Docker + Docker Compose (docker-compose OR docker compose plugin)
@@ -9,39 +10,43 @@
 
 set -euo pipefail
 
+SCRIPTS_RAW_BASE="${SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/WEBzaytsev/scripts/main}"
+
+_bootstrap_lib() {
+  [[ -n "${SCRIPTS_COMMON_LOADED:-}" ]] && return 0
+  local lib=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "/dev/fd/"* && "${BASH_SOURCE[0]}" != "/dev/stdin" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/common.sh"
+  fi
+  if [[ -n "$lib" && -f "$lib" ]]; then
+    # shellcheck source=lib/common.sh
+    source "$lib"
+  else
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL "${SCRIPTS_RAW_BASE}/lib/common.sh?v=$(date +%s)" -o "$tmp" \
+      || { echo "[ERROR] Failed to fetch lib/common.sh" >&2; rm -f "$tmp"; exit 1; }
+    source "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
+_bootstrap_lib
+
+# ---------- constants ----------
+
 LOCK_FILE="/var/run/docker-monitor.lock"
 INSTALL_DIR="/opt/docker-monitor"
 COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
 ENV_FILE="${INSTALL_DIR}/.env"
 
-# Defaults (can be overridden by .env or prompts)
-DOZZLE_HOSTNAME_DEFAULT=""
 DOZZLE_PORT_DEFAULT="7007"
 BESZEL_LISTEN_DEFAULT="45876"
-BESZEL_KEY_DEFAULT=""
-BESZEL_TOKEN_DEFAULT=""
-BESZEL_HUB_URL_DEFAULT=""
 
-ok()   { echo "[OK] $*"; }
-info() { echo "[INFO] $*"; }
-warn() { echo "[WARN] $*" >&2; }
-die()  { echo "[ERROR] $*" >&2; exit 1; }
+# ---------- lock protection ----------
 
-need() { command -v "$1" >/dev/null 2>&1 || die "Command not found: $1"; }
-is_root() { [[ "${EUID}" -eq 0 ]]; }
-has_tty() { [[ -r /dev/tty ]]; }
-
-check_docker() {
-  if ! docker info >/dev/null 2>&1; then
-    die "Docker is not running or not accessible. Start docker service first."
-  fi
-}
-
-# ---- lock protection ----
 acquire_lock() {
   if [[ -f "$LOCK_FILE" ]]; then
-    local pid
-    pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+    local pid; pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       die "Another instance is running (PID: $pid). If stuck, remove: $LOCK_FILE"
     fi
@@ -50,147 +55,19 @@ acquire_lock() {
   echo $$ >"$LOCK_FILE"
 }
 
-release_lock() {
-  rm -f "$LOCK_FILE"
-}
+release_lock() { rm -f "$LOCK_FILE"; }
 trap release_lock EXIT
 
-# ---- robust input ----
-read_tty() {
-  local __var="$1" __prompt="$2" __tmp=""
-  if has_tty; then
-    if ! IFS= read -r -p "$__prompt" __tmp </dev/tty; then
-      return 1
-    fi
-  else
-    return 1
+# ---------- docker ----------
+
+check_docker() {
+  if ! docker info >/dev/null 2>&1; then
+    die "Docker is not running or not accessible. Start docker service first."
   fi
-  printf -v "$__var" '%s' "$__tmp"
-  return 0
 }
 
-prompt_string() {
-  local var="$1" prompt="$2" default="${3:-}" value=""
-  while true; do
-    if ! read_tty value "${prompt}${default:+ (default: ${default})}: "; then
-      warn "No TTY available for prompt: '${prompt}'"
-      return 1
-    fi
-    value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    value="${value:-$default}"
-    if [[ -n "$value" ]]; then
-      printf -v "$var" '%s' "$value"
-      return 0
-    fi
-    warn "Value cannot be empty."
-  done
-}
+# ---------- compose generation ----------
 
-port_in_use() {
-  local p="$1"
-  if command -v ss >/dev/null 2>&1; then
-    if ss -H -ltn "sport = :$p" >/dev/null 2>&1; then
-      ss -H -ltn "sport = :$p" | grep -q . && return 0
-    fi
-    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\.)${p}$" && return 0
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\.)${p}$" && return 0
-  fi
-  return 1
-}
-
-rand_port() {
-  local min="${1:-10000}"
-  local max="${2:-65000}"
-  local tries=0 max_tries=120 p
-  while (( tries < max_tries )); do
-    if command -v shuf >/dev/null 2>&1; then
-      p="$(shuf -i "${min}-${max}" -n 1)"
-    else
-      p=$(( (RANDOM % (max - min + 1)) + min ))
-    fi
-    if ! port_in_use "$p"; then
-      echo "$p"
-      return 0
-    fi
-    ((tries++))
-  done
-  die "Failed to find free port after $max_tries tries"
-}
-
-prompt_port() {
-  local var="$1" prompt="$2" default="${3:-}" value=""
-  while true; do
-    if ! read_tty value "${prompt}${default:+ (default: ${default})}: "; then
-      warn "No TTY available for port prompt."
-      return 1
-    fi
-    value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    value="${value:-$default}"
-
-    if [[ -z "$value" ]]; then
-      warn "Port cannot be empty."
-      continue
-    fi
-
-    if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 65535 )); then
-      warn "Invalid port: '$value'. Must be 1-65535."
-      continue
-    fi
-
-    if port_in_use "$value"; then
-      warn "Port $value is in use."
-      continue
-    fi
-
-    printf -v "$var" '%s' "$value"
-    return 0
-  done
-}
-
-prompt_yn() {
-  local msg="$1" def="${2:-y}" ans
-  while true; do
-    if ! read_tty ans "${msg} [y/n] (default: ${def}): "; then
-      warn "No TTY for prompt: '${msg}'"
-      return 1
-    fi
-    ans="${ans:-$def}"
-    ans="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    case "$ans" in
-      y|yes) return 0 ;;
-      n|no)  return 1 ;;
-      *) warn "Invalid input: '$ans'. Enter y or n." ;;
-    esac
-  done
-}
-
-# ---- validation ----
-valid_ssh_key() {
-  local k="$1"
-  [[ "$k" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-dss)[[:space:]]+[A-Za-z0-9+/=]+ ]] && return 0
-  if command -v ssh-keygen >/dev/null 2>&1; then
-    echo "$k" | ssh-keygen -l -f - >/dev/null 2>&1 && return 0
-  fi
-  return 1
-}
-
-valid_url() {
-  [[ "$1" =~ ^https?:// ]]
-}
-
-usage() {
-  cat <<EOF
-Usage: sudo $0 [OPTIONS]
-
-Options:
-  --hub-url URL    Beszel hub URL (overrides .env / prompt)
-  -h, --help       Show help
-EOF
-}
-
-# ---- compose generation ----
 generate_compose() {
   local dozzle_hostname="$1"
   local dozzle_port="$2"
@@ -228,12 +105,25 @@ services:
 EOF
 }
 
+# ---------- usage ----------
+
+usage() {
+  cat <<EOF
+Usage: sudo $0 [OPTIONS]
+
+Options:
+  --hub-url URL    Beszel hub URL (overrides .env / prompt)
+  -h, --help       Show help
+EOF
+}
+
+# ---------- main ----------
+
 main() {
   is_root || die "Run as root (sudo)."
 
   local hub_url_arg=""
 
-  # Parse args
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hub-url)
@@ -248,11 +138,9 @@ main() {
   done
 
   acquire_lock
-
   need docker
   check_docker
 
-  # Detect docker compose command (must exist)
   local compose_cmd=""
   if command -v docker-compose >/dev/null 2>&1; then
     compose_cmd="docker-compose"
@@ -264,7 +152,6 @@ main() {
 
   has_tty || die "No TTY available. This script requires interactive input."
 
-  # Load .env if exists
   if [[ -f "$ENV_FILE" ]]; then
     info "Loading variables from ${ENV_FILE}..."
     set -a
@@ -273,30 +160,26 @@ main() {
     set +a
   fi
 
-  # Use env vars, args, or defaults
-  local dozzle_hostname="${DOZZLE_HOSTNAME:-$DOZZLE_HOSTNAME_DEFAULT}"
+  local dozzle_hostname="${DOZZLE_HOSTNAME:-}"
   local dozzle_port="${DOZZLE_PORT:-$DOZZLE_PORT_DEFAULT}"
   local beszel_listen="${BESZEL_LISTEN:-$BESZEL_LISTEN_DEFAULT}"
-  local beszel_key="${BESZEL_KEY:-$BESZEL_KEY_DEFAULT}"
-  local beszel_token="${BESZEL_TOKEN:-$BESZEL_TOKEN_DEFAULT}"
-  local beszel_hub_url="${hub_url_arg:-${BESZEL_HUB_URL:-$BESZEL_HUB_URL_DEFAULT}}"
+  local beszel_key="${BESZEL_KEY:-}"
+  local beszel_token="${BESZEL_TOKEN:-}"
+  local beszel_hub_url="${hub_url_arg:-${BESZEL_HUB_URL:-}}"
 
   echo
   info "Docker Monitor Setup (dozzle + beszel)"
   echo
 
-  # Prompt for values
   prompt_string dozzle_hostname "Dozzle hostname" "$dozzle_hostname" || die "Failed to get hostname"
-  
-  # Dozzle port: random or manual
+
   if prompt_yn "Generate random external port for Dozzle?" "y"; then
     dozzle_port="$(rand_port)"
     ok "Generated port: $dozzle_port"
   else
     prompt_port dozzle_port "Dozzle external port" "$dozzle_port" || die "Failed to get dozzle port"
   fi
-  
-  # Beszel listen port: random or manual
+
   if prompt_yn "Generate random listen port for Beszel?" "y"; then
     beszel_listen="$(rand_port)"
     ok "Generated port: $beszel_listen"
@@ -306,9 +189,7 @@ main() {
 
   while true; do
     prompt_string beszel_key "Beszel SSH key" "$beszel_key" || die "Failed to get beszel key"
-    if valid_ssh_key "$beszel_key"; then
-      break
-    fi
+    if valid_ssh_key "$beszel_key"; then break; fi
     warn "Invalid SSH key format. Expected: ssh-rsa, ssh-ed25519, ecdsa-sha2-nistp*, or ssh-dss"
     beszel_key=""
   done
@@ -320,12 +201,9 @@ main() {
     beszel_token=""
   done
 
-  # HUB_URL is REQUIRED
   while true; do
     prompt_string beszel_hub_url "Beszel hub URL (required, e.g. https://hub.example.com)" "$beszel_hub_url" || die "Failed to get hub URL"
-    if [[ -n "$beszel_hub_url" ]] && valid_url "$beszel_hub_url"; then
-      break
-    fi
+    if [[ -n "$beszel_hub_url" ]] && valid_url "$beszel_hub_url"; then break; fi
     warn "Invalid HUB_URL. Must start with http:// or https://"
     beszel_hub_url=""
   done
@@ -352,12 +230,10 @@ main() {
     "$beszel_hub_url" > "$COMPOSE_FILE"
   ok "Generated: $COMPOSE_FILE"
 
-  # Save .env for future runs
   {
     echo "DOZZLE_HOSTNAME=${dozzle_hostname}"
     echo "DOZZLE_PORT=${dozzle_port}"
     echo "BESZEL_LISTEN=${beszel_listen}"
-    # Quote potentially complex values safely for bash source
     printf "BESZEL_KEY=%q\n" "$beszel_key"
     printf "BESZEL_TOKEN=%q\n" "$beszel_token"
     printf "BESZEL_HUB_URL=%q\n" "$beszel_hub_url"

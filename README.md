@@ -1,3 +1,13 @@
+> **Создано с помощью вайбкодинга.** Открывает дыры в безопасности, нестабильно и скорее всего не работает. Используй на свой страх и риск.
+
+## Веб-панель
+
+Локально: открой [`index.html`](index.html) в браузере.
+
+Онлайн: [webzaytsev.github.io/scripts](https://webzaytsev.github.io/scripts/)
+
+---
+
 ## BBR
 
 ```bash
@@ -31,21 +41,21 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 ### Добавление SSH ключа (только авторизация по ключу)
 
 ```bash
-KEY="ssh-ed25519 AAAAC3..." 
+KEY="ssh-ed25519 AAAAC3..."
 curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY"
 ```
 
 ### Ключ + случайный порт (неинтерактивно)
 
 ```bash
-KEY="ssh-ed25519 AAAAC3..." 
+KEY="ssh-ed25519 AAAAC3..."
 curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --random-port --yes
 ```
 
 ### Ключ + фиксированный порт (неинтерактивно)
 
 ```bash
-KEY="ssh-ed25519 AAAAC3..." 
+KEY="ssh-ed25519 AAAAC3..."
 curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$(date +%s)" | sudo bash -s -- -k "$KEY" --port 22222 --yes
 ```
 
@@ -101,10 +111,10 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ssh-config.sh?v=$
 curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-aliases.sh?v=$(date +%s)" | sudo bash
 ```
 
-С подключением алиасов для пользователя (добавляет source /etc/profile в ~/.bashrc):
+Удаление:
 
 ```bash
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-aliases.sh?v=$(date +%s)" | sudo bash -s -- --user "$USER"
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-aliases.sh?v=$(date +%s)" | sudo bash -s -- --uninstall
 ```
 
 ---
@@ -128,11 +138,13 @@ curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/docker-monitor.sh
 ## UFW Firewall
 
 ```bash
-curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" -o ufw-config.sh && sudo bash ufw-config.sh
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" | sudo bash
 ```
 
+Неинтерактивно:
+
 ```bash
-wget -qO ufw-config.sh "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" && sudo bash ufw-config.sh
+curl -sSL "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-config.sh?v=$(date +%s)" | sudo bash -s -- --yes
 ```
 
 ---
@@ -140,12 +152,11 @@ wget -qO ufw-config.sh "https://cdn.jsdelivr.net/gh/WEBzaytsev/scripts@main/ufw-
 ## Генерация SSH ключа
 
 ```bash
-ssh-keygen -t ed25519 -C "your_email@example.com" -f ./id_ed25519
+ssh-keygen -t ed25519 -C "your_email@example.com" -f ~/.ssh/id_ed25519
 ```
 
 Показать публичный ключ:
 
 ```bash
-cat ./id_ed25519.pub
+cat ~/.ssh/id_ed25519.pub
 ```
-

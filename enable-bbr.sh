@@ -3,6 +3,7 @@
 # Polished: fixes apt-get update usage, avoids double sysctl --system, better fallbacks & diagnostics.
 set -eu
 
+ok()   { printf '%s\n' "[OK] $*"; }
 log()  { printf '%s\n' "[INFO] $*"; }
 warn() { printf '%s\n' "[WARN] $*" >&2; }
 die()  { printf '%s\n' "[ERROR] $*" >&2; exit 1; }
@@ -58,7 +59,7 @@ backup_file() {
   [ -f "$f" ] || return 0
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   cp -f "$f" "${f}.bak.${ts}"
-  log "Backup: ${f}.bak.${ts}"
+  ok "Backup: ${f}.bak.${ts}"
 }
 
 atomic_write() {
@@ -163,7 +164,7 @@ main() {
 
   if [ -d "$conf_d" ]; then
     if [ -f "$conf_file" ]; then backup_file "$conf_file"; fi
-    log "Writing ${conf_file}…"
+    log "Writing ${conf_file}..."
     atomic_write "$conf_file" <<EOF
 # Managed by enable-bbr.sh
 net.core.default_qdisc=${desired_qdisc}
@@ -177,7 +178,7 @@ EOF
     ensure_kv_in_file "$fallback" "net.ipv4.tcp_congestion_control" "$desired_cc"
   fi
 
-  log "Applying sysctl settings…"
+  log "Applying sysctl settings..."
   if ! sysctl_apply; then
     dump_debug
     die "Failed to apply sysctl settings."
@@ -195,9 +196,9 @@ EOF
     warn "default_qdisc is '$got_qdisc' (expected '$desired_qdisc'). BBR can still work, but fq is recommended."
   fi
 
-  log "OK: BBR enabled."
-  log "tcp_congestion_control=${got_cc}"
-  log "default_qdisc=${got_qdisc}"
+  ok "BBR enabled."
+  ok "tcp_congestion_control=${got_cc}"
+  ok "default_qdisc=${got_qdisc}"
 }
 
 main "$@"
